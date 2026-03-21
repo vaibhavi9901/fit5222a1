@@ -3,6 +3,7 @@ This is the python script for question 1. In this script, you are required to im
 """
 from lib_piglet.utils.tools import eprint
 import glob, os, sys
+import heapq
 
 #import necessary modules that this python scripts need.
 try:
@@ -41,41 +42,97 @@ test = 0
 # @param rail The flatland railway GridTransitionMap
 # @param max_timestep The max timestep of this episode.
 # @return path A list of (x,y) tuple.
+def heuristic(pos, goal):
+    """
+    Manhattan distance heuristic.
+    Admissible because each step moves exactly one cell in one cardinal direction.
+    """
+    return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
+ 
+ 
 def get_path(start: tuple, start_direction: int, goal: tuple, rail: GridTransitionMap, max_timestep: int):
-    ############
-    # Below is an dummy path finding implementation,
-    # which always choose the first available transition of current state.
-    #
-    # Replace these with your implementation and return a list of (x,y) tuple as your plan.
-    # Your plan should avoid conflicts with paths in existing_paths.
-    ############
+    """
+    A* search for single-agent pathfinding in the Flatland railway environment.
+ 
+    State space: (position, direction) — direction is part of the state because
+    valid transitions from a cell depend on the agent's current heading.
+ 
+    Returns a list of (x, y) location tuples from start to goal (inclusive).
+    Returns an empty list if no path is found.
+    """
+ 
+    # ---------------------------------------------------------------------------
+    # Direction deltas: North=0, East=1, South=2, West=3
+    # ---------------------------------------------------------------------------
+    direction_deltas = {
+        Directions.NORTH: (-1,  0),
+        Directions.EAST:  ( 0,  1),
+        Directions.SOUTH: ( 1,  0),
+        Directions.WEST:  ( 0, -1),
+    }
+ 
+    # ---------------------------------------------------------------------------
+    # A* open list: (f, g, position, direction, parent_key)
+    # We use a heap keyed on f = g + h.
+    # ---------------------------------------------------------------------------
+    start_state = (start, start_direction)
+    h = heuristic(start, goal)
+    # heap entry: (f_cost, g_cost, position, direction)
+    open_heap = [(h, 0, start, start_direction)]
+ 
+    # g_cost: best known cost to reach each (position, direction) state
+    g_cost = {start_state: 0}
+ 
+    # came_from: maps each state to its parent state, used to reconstruct path
+    came_from = {start_state: None}
+ 
+    while open_heap:
+        f, g, pos, direction = heapq.heappop(open_heap)
+ 
+        # Skip if we've already found a cheaper way to this state
+        if g > g_cost.get((pos, direction), float('inf')):
+            continue
+ 
+        # Goal check — reached the goal cell
+        if pos == goal:
+            return reconstruct_path(came_from, (pos, direction))
+ 
+        # Expand neighbours using valid rail transitions
+        valid_transitions = rail.get_transitions(pos[0], pos[1], direction)
+ 
+        for new_direction, is_valid in enumerate(valid_transitions):
+            if not is_valid:
+                continue
+ 
+            dx, dy = direction_deltas[new_direction]
+            new_pos = (pos[0] + dx, pos[1] + dy)
+ 
+            new_g = g + 1  # uniform step cost
+            new_state = (new_pos, new_direction)
+ 
+            if new_g < g_cost.get(new_state, float('inf')):
+                g_cost[new_state] = new_g
+                came_from[new_state] = (pos, direction)
+                new_f = new_g + heuristic(new_pos, goal)
+                heapq.heappush(open_heap, (new_f, new_g, new_pos, new_direction))
+ 
+    # No path found
+    return []
+ 
+ 
+def reconstruct_path(came_from, final_state):
+    """
+    Walk back through came_from to reconstruct the path.
+    Returns a list of (x, y) position tuples from start to goal.
+    """
     path = []
-    loc = start
-    direction = start_direction
-    for t in range(0, int(max_timestep/10)):
-        path.append(loc)
-        if loc == goal:
-            break;
-        valid_transitions = rail.get_transitions(loc[0],loc[1],direction)
-        for i in range(0,len(valid_transitions)):
-            if valid_transitions[i]:
-                new_x=loc[0]
-                new_y=loc[1]
-                action = i
-                if action == Directions.NORTH:
-                    new_x -= 1
-                elif action == Directions.EAST:
-                    new_y += 1
-                elif action == Directions.SOUTH:
-                    new_x += 1
-                elif action == Directions.WEST:
-                    new_y -= 1
-                loc = (new_x,new_y)
-                direction = action
-
-                break;
+    state = final_state
+    while state is not None:
+        pos, _ = state
+        path.append(pos)
+        state = came_from[state]
+    path.reverse()
     return path
-
 
 #########################
 # You should not modify codes below, unless you want to modify test_cases to test specific instance. You can read it know how we ran flatland environment.
