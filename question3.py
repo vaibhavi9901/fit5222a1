@@ -167,7 +167,7 @@ def space_time_astar(
 ############ LNS-based planning ###############
 
 # ── LNS parameters ───────────────────────────────────────────────────────────
-LNS_ITERATIONS_INITIAL  = 50   # iterations in get_path
+LNS_ITERATIONS_INITIAL  = 1   # iterations in get_path
 LNS_NEIGHBOURHOOD_SIZE  = 5     # agents per LNS neighbourhood
 LNS_ITERATIONS_REPLAN   = 50    # iterations per replan call
 LNS_TIME_BUDGET         = 20.0  # seconds budget for LNS in get_path
