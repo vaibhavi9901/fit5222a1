@@ -447,7 +447,7 @@ def get_path(agents, rail, max_timestep):
     # Phase 2: LNS improvement
     if time.time() < budget_deadline:
         path_all = run_lns(
-            agents, rail, path_all, h_dists, lns_budget,
+            agents, rail, path_all, h_dists, max_timestep,
             iterations=iters,
             neighbourhood_size=nbr,
             start_time=0,
