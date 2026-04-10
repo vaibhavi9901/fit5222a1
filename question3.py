@@ -3,6 +3,7 @@ from lib_piglet.utils.tools import eprint
 from typing import List, Tuple, Dict, Optional
 import glob, os, sys,time,json, heapq, random
 from collections import deque
+import multiprocessing as mp
 
 #import necessary modules that this python scripts need.
 try:
@@ -404,6 +405,13 @@ _cfg: dict = {}
 #  get_path
 # ════════════════════════════════════════════════════════════════════════════
  
+def get_path_worker(queue, agents, rail, max_timestep):
+    try:
+        result = get_path(agents, rail, max_timestep)
+        queue.put(result)
+    except Exception as e:
+        queue.put(e)
+
 def get_path(agents, rail, max_timestep):
     global _cfg
     n = len(agents)
@@ -422,7 +430,7 @@ def get_path(agents, rail, max_timestep):
     budget_deadline = time.time() + lns_budget
  
     # Phase 1: Prioritised Planning (slack order, uses precomputed h_dists)
-    order = compute_slack_order(agents, h_dists, max_timestep)
+    order = compute_slack_order(agents, h_dists, lns_budget)
     planned = []
     for agent_id in order:
         if time.time() > budget_deadline:
@@ -430,7 +438,7 @@ def get_path(agents, rail, max_timestep):
         agent = agents[agent_id]
         path = space_time_astar(
             agent.initial_position, agent.initial_direction,
-            agent.target, rail, planned, max_timestep,
+            agent.target, rail, planned, lns_budget,
             h_dists[agent_id], start_time=0, time_limit=astar_lim,
         )
         path_all[agent_id] = path
@@ -439,7 +447,7 @@ def get_path(agents, rail, max_timestep):
     # Phase 2: LNS improvement
     if time.time() < budget_deadline:
         path_all = run_lns(
-            agents, rail, path_all, h_dists, max_timestep,
+            agents, rail, path_all, h_dists, lns_budget,
             iterations=iters,
             neighbourhood_size=nbr,
             start_time=0,
