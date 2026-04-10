@@ -81,6 +81,7 @@ def space_time_astar(
     max_timestep: int,
     h_dist: dict,
     start_time: int = 0,
+    time_limit: float = None,  # NEW: time limit in seconds
 ) -> list:
     """
     Space-Time A* with wait actions.
@@ -93,11 +94,19 @@ def space_time_astar(
     if start not in h_dist:
         return []
  
+    # Record start time for timeout checking
+    search_start_time = time.time()
+
     open_heap = [(h_dist[start], 0, start[0], start[1], start_dir, start_time)]
     visited: dict = {}
     parent: dict = {(start[0], start[1], start_dir, start_time): None}
  
     while open_heap:
+        # Check time limit BEFORE each node expansion
+        if time_limit is not None and (time.time() - search_start_time) > time_limit:
+            # Timeout - return empty path
+            return []
+        
         f, g, x, y, direction, t = heapq.heappop(open_heap)
         state = (x, y, direction, t)
  
@@ -309,6 +318,7 @@ def run_lns(
     if not plannable:
         return best_paths
  
+    no_improvement_count = 0
     for _ in range(iterations):
         if deadline is not None and time.time() > deadline:
             break
@@ -353,6 +363,7 @@ def run_lns(
                 pos, d, agent.target, rail,
                 constraints, max_timestep, h_dists[nid],
                 start_time=start_time,
+                time_limit=0.5
             )
             if not new_path:
                 success = False
@@ -367,6 +378,19 @@ def run_lns(
         if new_delay <= best_delay:
             best_paths = candidate_paths
             best_delay = new_delay
+            no_improvement_count = 0
+        
+        elif new_delay == best_delay:
+            # Same quality - could still be useful for diversity
+            no_improvement_count += 1
+            
+        else:
+            no_improvement_count += 1
+        
+        # Stop if no improvement for 10 consecutive iterations 
+        if no_improvement_count >= 10:
+            break
+
  
     return best_paths
  
@@ -408,6 +432,7 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
             agent.initial_position, agent.initial_direction,
             agent.target, rail, planned, max_timestep,
             h_dists[agent_id], start_time=0,
+            time_limit=2.0  # More time for initial planning (2 seconds)
         )
         path_all[agent_id] = path
         planned.append(path)
@@ -419,13 +444,13 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
         # Reduce iterations based on remaining time
         adjusted_iterations = min(
             LNS_ITERATIONS_INITIAL,
-            int(remaining_budget * 10)  # Rough heuristic
+            int(remaining_budget * 2)  # Rough heuristic
         )
         
         path_all = run_lns(
             agents, rail, path_all, h_dists, max_timestep,
             iterations=adjusted_iterations,  # Use fewer iterations!
-            neighbourhood_size=neighbourhood_size,
+            neighbourhood_size = min(20, max(5, n // 10)),
             start_time=0,
             deadline=deadline,
         )
@@ -445,6 +470,8 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
 #  replan  — LNS-based periodic replanning
 # ════════════════════════════════════════════════════════════════════════════
  
+LNS_TIME_BUDGET_REPLAN = 0.5  # seconds per replan call
+
 def replan(
     agents: List[EnvAgent],
     rail: GridTransitionMap,
@@ -513,10 +540,11 @@ def replan(
     new_paths = run_lns(
         agents, rail, new_paths, h_dists, max_timestep,
         iterations=LNS_ITERATIONS_REPLAN,
-        #neighbourhood_size=LNS_NEIGHBOURHOOD_SIZE,
-        neighbourhood_size = len(agents),
+        neighbourhood_size=max(5, min(20, len(agents) // 10)),
+        #neighbourhood_size = len(agents),
         start_time=current_timestep,
         frozen_mask=frozen_mask,
+        deadline=time.time() + LNS_TIME_BUDGET_REPLAN,
     )
  
     return new_paths
