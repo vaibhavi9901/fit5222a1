@@ -85,8 +85,8 @@ def malfunction_from_file(filename: str, load_from_package=None) -> Tuple[Malfun
             return Malfunction(0)
 
         if agent.malfunction_data['malfunction'] < 1:
-            if np_random.rand() < _malfunction_prob(mean_malfunction_rate):
-                num_broken_steps = np_random.randint(min_number_of_steps_broken,
+            if np_random.random() < _malfunction_prob(mean_malfunction_rate):
+                num_broken_steps = np_random.integers(min_number_of_steps_broken,
                                                      max_number_of_steps_broken + 1) + 1
                 return Malfunction(num_broken_steps)
         return Malfunction(0)
@@ -133,8 +133,8 @@ def malfunction_from_params(parameters: MalfunctionParameters) -> Tuple[Malfunct
             return Malfunction(0)
 
         if agent.malfunction_data['malfunction'] < 1:
-            if np_random.rand() < _malfunction_prob(mean_malfunction_rate):
-                num_broken_steps = np_random.randint(min_number_of_steps_broken,
+            if np_random.random() < _malfunction_prob(mean_malfunction_rate):
+                num_broken_steps = np_random.integers(min_number_of_steps_broken,
                                                      max_number_of_steps_broken + 1) + 1
                 return Malfunction(num_broken_steps)
         return Malfunction(0)
@@ -156,8 +156,8 @@ class ParamMalfunctionGen(object):
             return Malfunction(0)
 
         if agent.malfunction_data['malfunction'] < 1:
-            if np_random.rand() < _malfunction_prob(self.mean_malfunction_rate):
-                num_broken_steps = np_random.randint(self.min_number_of_steps_broken,
+            if np_random.random() < _malfunction_prob(self.mean_malfunction_rate):
+                num_broken_steps = np_random.integers(self.min_number_of_steps_broken,
                                                      self.max_number_of_steps_broken + 1) + 1
                 return Malfunction(num_broken_steps)
         return Malfunction(0)

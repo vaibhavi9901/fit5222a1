@@ -1134,7 +1134,7 @@ class RailEnv(Environment):
         :param rate:
         :return:
         """
-        u = self.np_random.rand()
+        u = self.np_random.random()
         x = - np.log(1 - u) * rate
         return x
 
