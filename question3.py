@@ -384,19 +384,26 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
     """
     n = len(agents)
     path_all = [[] for _ in range(n)]
- 
-    # ── Dynamic neighbourhood size: one neighbourhood per agent ──────────
+
+    # ── Budget clock starts now, covering Phase 1 + LNS ─────────────────
+    deadline = time.time() + LNS_TIME_BUDGET
+    #deadline = LNS_TIME_BUDGET
+
+
+    # ── Dynamic neighbourhood size ────────────────────────────────────────
     neighbourhood_size = n
- 
+
     # ── Precompute heuristics ─────────────────────────────────────────────
     h_dists = precompute_heuristics(agents, rail)
- 
+
     # ── Phase 1: Prioritised Planning with slack ordering ─────────────────
     order = compute_slack_order(agents, rail, max_timestep)
-    planned: List[list] = []   # grows as constraints
- 
+    planned: List[list] = []
+
     for agent_id in order:
         agent = agents[agent_id]
+        if time.time() > deadline:
+            break
         path = space_time_astar(
             agent.initial_position, agent.initial_direction,
             agent.target, rail, planned, max_timestep,
@@ -404,16 +411,33 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
         )
         path_all[agent_id] = path
         planned.append(path)
- 
+
     # ── Phase 2: LNS improvement ──────────────────────────────────────────
-    path_all = run_lns(
-        agents, rail, path_all, h_dists, max_timestep,
-        iterations=LNS_ITERATIONS_INITIAL,
-        neighbourhood_size=neighbourhood_size,
-        start_time=0,
-        deadline=time.time() + LNS_TIME_BUDGET,
-    )
- 
+    # Only run LNS if we have time left
+    if time.time() < deadline:
+        remaining_budget = deadline - time.time()
+        # Reduce iterations based on remaining time
+        adjusted_iterations = min(
+            LNS_ITERATIONS_INITIAL,
+            int(remaining_budget * 10)  # Rough heuristic
+        )
+        
+        path_all = run_lns(
+            agents, rail, path_all, h_dists, max_timestep,
+            iterations=adjusted_iterations,  # Use fewer iterations!
+            neighbourhood_size=neighbourhood_size,
+            start_time=0,
+            deadline=deadline,
+        )
+
+    # path_all = run_lns(
+    #     agents, rail, path_all, h_dists, max_timestep,
+    #     iterations=LNS_ITERATIONS_INITIAL,
+    #     neighbourhood_size=neighbourhood_size,
+    #     start_time=0,
+    #     deadline=deadline,          # shared deadline, not a fresh one
+    # )
+
     return path_all
  
  
