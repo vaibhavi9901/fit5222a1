@@ -23,7 +23,7 @@ except Exception as e:
 #########################
 
 # Set these debug option to True if you want more information printed
-debug = False
+debug = True
 visualizer = False
 
 # If you want to test on specific instance, turn test_single_instance to True and specify the level and test number
@@ -433,7 +433,7 @@ def get_path(agents, rail, max_timestep):
     budget_deadline = time.time() + lns_budget
  
     # Phase 1: Prioritised Planning (slack order, uses precomputed h_dists)
-    order = compute_slack_order(agents, h_dists, lns_budget)
+    order = compute_slack_order(agents, h_dists, max_timestep)
     planned = []
     for agent_id in order:
         if time.time() > budget_deadline:
@@ -441,7 +441,7 @@ def get_path(agents, rail, max_timestep):
         agent = agents[agent_id]
         path = space_time_astar(
             agent.initial_position, agent.initial_direction,
-            agent.target, rail, planned, lns_budget,
+            agent.target, rail, planned, max_timestep,
             h_dists[agent_id], start_time=0, time_limit=astar_lim,
         )
         path_all[agent_id] = path
@@ -465,42 +465,54 @@ def get_path(agents, rail, max_timestep):
 #  replan
 # ════════════════════════════════════════════════════════════════════════════
  
-def replan(
-    agents, rail, current_timestep,
-    existing_paths, max_timestep,
-    new_malfunction_agents, failed_agents,
-):
+def replan(agents, rail, current_timestep, existing_paths, max_timestep,
+           new_malfunction_agents, failed_agents):
     new_paths = [list(p) for p in existing_paths]
-    h_dists   = precompute_heuristics(agents, rail)
- 
+    h_dists = precompute_heuristics(agents, rail)
+
     cfg           = _cfg if _cfg else {}
     astar_lim     = cfg.get('astar_limit', 1.0)
     iters_replan  = cfg.get('iters_replan', LNS_ITERATIONS_REPLAN)
     replan_budget = cfg.get('replan_budget', LNS_TIME_BUDGET_REPLAN)
     nbr           = cfg.get('neighbourhood_size', LNS_NEIGHBOURHOOD_SIZE)
- 
+
+    # ── Fix prefix for ALL active agents before doing anything else ───────
+    # If an agent was blocked, its actual position lags behind its planned
+    # path. Truncate and pad to actual position so no path has a jump.
+    for agent in agents:
+        i = agent.handle
+        if agent.status in (2, 3) or agent.position is None:
+            continue
+        actual_pos = agent.position
+        prefix = list(existing_paths[i][:current_timestep])
+        # Pad if path is short
+        while len(prefix) < current_timestep:
+            prefix.append(actual_pos)
+        # Override the last entry to match actual position
+        if prefix and prefix[-1] != actual_pos:
+            prefix[-1] = actual_pos
+        new_paths[i] = prefix  # suffix will be added below or by LNS
+
     replan_set = set(failed_agents) | set(new_malfunction_agents)
- 
+
+    # ── Fix malfunctioning/failed agents with forced waits + A* suffix ────
     for agent_id in replan_set:
         agent = agents[agent_id]
         if agent.status in (2, 3) or agent.position is None:
             continue
- 
+
         cur_pos, cur_dir = agent.position, agent.direction
         mal_dur = (agent.malfunction_data.get("malfunction", 0)
                    if agent.malfunction_data else 0)
- 
-        prefix = list(existing_paths[agent_id][:current_timestep])
-        if len(prefix) < current_timestep:
-            prefix += [cur_pos] * (current_timestep - len(prefix))
- 
+
+        prefix       = new_paths[agent_id][:current_timestep]  # already corrected above
         wait_segment = [cur_pos] * (mal_dur + 1)
         resume_t     = current_timestep + mal_dur
- 
+
         if cur_pos == agent.target:
             new_paths[agent_id] = prefix + wait_segment
             continue
- 
+
         constraints = [new_paths[i] for i in range(len(agents)) if i != agent_id]
         suffix = space_time_astar(
             cur_pos, cur_dir, agent.target, rail,
@@ -508,7 +520,8 @@ def replan(
             start_time=resume_t, time_limit=astar_lim,
         )
         new_paths[agent_id] = prefix + wait_segment + (suffix[1:] if suffix else [])
- 
+
+    # ── LNS over all active agents ────────────────────────────────────────
     frozen_mask = [
         agent.status in (2, 3) or agent.position is None
         for agent in agents
@@ -522,7 +535,7 @@ def replan(
         deadline=time.time() + replan_budget,
         astar_limit=astar_lim,
     )
- 
+
     return new_paths
 
  
