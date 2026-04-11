@@ -279,18 +279,18 @@ def adapt_parameters(agents, h_dists, max_timestep):
  
     # Iterations: fewer for large/hard instances (each call is slower)
     if n <= 12:
-        iters_initial = 1
-        iters_replan  = 80
+        iters_initial = 20
+        iters_replan  = 50
         lns_budget    = 25.0
         replan_budget = 2.0
     elif n <= 30:
-        iters_initial = 1
-        iters_replan  = 60
+        iters_initial = 10
+        iters_replan  = 50
         lns_budget    = 15.0
         replan_budget = 1.5
     else:
-        iters_initial = 1
-        iters_replan  = 40
+        iters_initial = 20
+        iters_replan  = 50
         lns_budget    = 12.0
         replan_budget = 1.0
  
@@ -321,7 +321,7 @@ def run_lns(
         frozen_mask = [False] * len(agents)
  
     best_paths = [list(p) for p in paths]
-    best_delay = total_delay(agents, best_paths, max_timestep)
+    best_delay = total_delay(agents, best_paths, (max_timestep/len(agents)).round())
  
     if start_time == 0:
         plannable = [i for i in range(len(agents)) if not frozen_mask[i]]
@@ -406,6 +406,7 @@ _cfg: dict = {}
 # ════════════════════════════════════════════════════════════════════════════
 #  get_path
 # ════════════════════════════════════════════════════════════════════════════
+
  
 def get_path_worker(queue, agents, rail, max_timestep):
     try:
