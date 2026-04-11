@@ -70,9 +70,9 @@ def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
                 return True
             if p[t + 1] == cur_loc and p[t] == new_loc:    # edge (swap)
                 return True
-            else:
+        else:
             # Agent is parked at goal indefinitely — block that cell
-                if p[-1] == new_loc: return True
+            if p[-1] == new_loc: return True
     return False
  
  
@@ -676,7 +676,7 @@ def replan(
             new_paths[agent_id] = prefix + wait_segment + (suffix[1:] if mal_dur > 0 else suffix)
         else:
             new_paths[agent_id] = prefix + wait_segment
-            
+
     # Pass 1: replan malfunctioned / failed agents
     for agent_id in replan_order:
         _replan_one(agent_id)
@@ -691,8 +691,8 @@ def replan(
             continue
         path = new_paths[agent_id]
         # Check if this agent's future path conflicts with any updated path
+        other_paths = [new_paths[i] for i in range(len(agents)) if i != agent_id]
         for t in range(current_timestep, min(len(path) - 1, max_timestep)):
-            other_paths = [new_paths[i] for i in range(len(agents)) if i != agent_id]
             if has_conflict(path[t+1], path[t], t, other_paths):
                 affected.add(agent_id)
                 break
