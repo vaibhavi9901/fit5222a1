@@ -29,7 +29,7 @@ visualizer = False
 # If you want to test on specific instance, turn test_single_instance to True and specify the level and test number
 test_single_instance = True
 level = 5
-test = 5
+test = 4
 
 def bfs_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
     """
@@ -55,8 +55,11 @@ def bfs_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
     return dist
  
  
+# def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
+#                  constraint_paths: list) -> bool:
 def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
-                 constraint_paths: list) -> bool:
+                 constraint_paths: list,
+                 agents_removed_at_target: bool = True) -> bool:
     """
     Vertex and edge conflict check against already-planned paths.
     Agents removed at target are gone from the map, so we only block
@@ -70,9 +73,13 @@ def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
                 return True
             if p[t + 1] == cur_loc and p[t] == new_loc:    # edge (swap)
                 return True
-        else:
-            # Agent is parked at goal indefinitely — block that cell
-            if p[-1] == new_loc: return True
+        # else:
+        #     # Agent is parked at goal indefinitely — block that cell
+        #     if p[-1] == new_loc: return True
+        elif not agents_removed_at_target:
+            # Only block parked goal cell if agent stays on map
+            if p[-1] == new_loc:
+                return True
     return False
  
  
