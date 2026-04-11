@@ -698,10 +698,18 @@ def replan(
                        if i != agent_id]
         h_dist = get_or_compute_heuristic(agent.target, rail)
 
-        if len(agents) >=75:
+        if len(agents) >=75 and len(agents)<150:
             suffix = space_time_astar(
             cur_pos, cur_dir, agent.target,
-            rail, constraints, 100, h_dist,
+            rail, constraints, 1000, h_dist,
+            start_time=resume_t,
+            deadline=agent.deadline,
+            )
+
+        elif len(agents) >=150:
+            suffix = space_time_astar(
+            cur_pos, cur_dir, agent.target,
+            rail, constraints, 50, h_dist,
             start_time=resume_t,
             deadline=agent.deadline,
             )
