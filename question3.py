@@ -517,47 +517,60 @@ def replan(agents, rail, current_timestep, existing_paths, max_timestep,
             constraints, max_timestep, h_dists[agent_id],
             start_time=resume_t, time_limit=astar_lim,
         )
-        new_paths[agent_id] = prefix + wait_segment + (suffix[1:] if suffix else [])
+        #new_paths[agent_id] = prefix + wait_segment + (suffix[1:] if suffix else [])
+        new_paths[agent_id] = prefix + wait_segment
+    
+    expanded = set(replan_set)
+    for aid in list(replan_set):
+        neighbours = find_blocking_agents(
+            aid, existing_paths, neighbourhood_size=nbr, start_time=current_timestep
+        )
+        expanded.update(neighbours)
+
+    replan_set = list(expanded)
+    for i in replan_set:
+        new_paths[i] = new_paths[i][:current_timestep]
 
     # ── Step 3: Generate suffixes for ALL other active agents ─────────────
     # Without this, prefix-only paths give false delay=0 and LNS rejects repairs
-    for i, agent in enumerate(agents):
-        if agent.status in (2, 3) or agent.position is None:
-            continue
-        if i in replan_set:
-            continue
-        if len(new_paths[i]) > current_timestep:
-            continue
+    # for i, agent in enumerate(agents):
+    #     if agent.status in (2, 3) or agent.position is None:
+    #         continue
+    #     if i in replan_set:
+    #         continue
+    #     if len(new_paths[i]) > current_timestep:
+    #         continue
 
-        # If agent is still exactly on its planned path, reuse the existing suffix.
-        # This preserves the conflict-free structure from get_path and avoids the
-        # ordering problem where earlier agents don't see later agents' future paths.
-        if (current_timestep < len(existing_paths[i])
-                and agent.position == existing_paths[i][current_timestep]):
-            new_paths[i] = new_paths[i] + existing_paths[i][current_timestep:]
-            continue
+    #     # If agent is still exactly on its planned path, reuse the existing suffix.
+    #     # This preserves the conflict-free structure from get_path and avoids the
+    #     # ordering problem where earlier agents don't see later agents' future paths.
+    #     if (current_timestep < len(existing_paths[i])
+    #             and agent.position == existing_paths[i][current_timestep]):
+    #         new_paths[i] = new_paths[i] + existing_paths[i][current_timestep:]
+    #         continue
 
-        # Agent deviated from plan — must replan its suffix.
-        # Process in reverse index order so higher-indexed agents (like 34) are
-        # planned first when they're closer to conflict zones.
-        constraints = [new_paths[j] for j in range(len(agents)) if j != i]
-        suffix = space_time_astar(
-            agent.position, agent.direction, agent.target, rail,
-            constraints, max_timestep, h_dists[i],
-            start_time=current_timestep, time_limit=astar_lim,
-        )
-        if suffix:
-            new_paths[i] = new_paths[i] + suffix
+    #     # Agent deviated from plan — must replan its suffix.
+    #     # Process in reverse index order so higher-indexed agents (like 34) are
+    #     # planned first when they're closer to conflict zones.
+    #     constraints = [new_paths[j] for j in range(len(agents)) if j != i]
+    #     suffix = space_time_astar(
+    #         agent.position, agent.direction, agent.target, rail,
+    #         constraints, max_timestep, h_dists[i],
+    #         start_time=current_timestep, time_limit=astar_lim,
+    #     )
+    #     if suffix:
+    #         new_paths[i] = new_paths[i] + suffix
 
-    # ── Step 4: LNS improvement ───────────────────────────────────────────
-    frozen_mask = [
-        agent.status in (2, 3) or agent.position is None or (agent.malfunction_data and agent.malfunction_data.get("malfunction", 0) > 0)
-        for agent in agents
-    ]
+    # ── Step 4: Joint LNS planning ───────────────────────────────────────────
+    frozen_mask = [True] * len(agents)
+    
+    for i in replan_set:
+        frozen_mask[i] = False  # only these agents can change
+
     new_paths = run_lns(
         agents, rail, new_paths, h_dists, max_timestep,
         iterations=iters_replan,
-        neighbourhood_size=nbr,
+        neighbourhood_size=max(nbr, len(replan_set)),  # stronger coordination
         start_time=current_timestep,
         frozen_mask=frozen_mask,
         deadline=time.time() + replan_budget,
