@@ -279,17 +279,17 @@ def adapt_parameters(agents, h_dists, max_timestep):
  
     # Iterations: fewer for large/hard instances (each call is slower)
     if n <= 12:
-        iters_initial = 300
+        iters_initial = 1
         iters_replan  = 80
         lns_budget    = 25.0
         replan_budget = 2.0
     elif n <= 30:
-        iters_initial = 200
+        iters_initial = 1
         iters_replan  = 60
         lns_budget    = 15.0
         replan_budget = 1.5
     else:
-        iters_initial = 120
+        iters_initial = 1
         iters_replan  = 40
         lns_budget    = 12.0
         replan_budget = 1.0
