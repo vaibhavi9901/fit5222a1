@@ -281,17 +281,17 @@ def adapt_parameters(agents, h_dists, max_timestep):
     if n <= 12:
         iters_initial = 20
         iters_replan  = 50
-        lns_budget    = 25.0
+        lns_budget    = max_timestep #25.0
         replan_budget = 2.0
     elif n <= 30:
         iters_initial = 10
         iters_replan  = 50
-        lns_budget    = 15.0
+        lns_budget    = max_timestep #15.0
         replan_budget = 1.5
     else:
         iters_initial = 20
         iters_replan  = 50
-        lns_budget    = 12.0
+        lns_budget    = max_timestep #12.0
         replan_budget = 1.0
  
     # A* time limit per call scales with mean path length
@@ -321,7 +321,7 @@ def run_lns(
         frozen_mask = [False] * len(agents)
  
     best_paths = [list(p) for p in paths]
-    best_delay = total_delay(agents, best_paths, ((max_timestep/len(agents)).round()).float())
+    best_delay = total_delay(agents, best_paths, max_timestep)
  
     if start_time == 0:
         plannable = [i for i in range(len(agents)) if not frozen_mask[i]]
