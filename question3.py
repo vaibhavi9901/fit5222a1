@@ -268,12 +268,14 @@ def adapt_parameters(agents, h_dists, max_timestep):
     mean_dist  = sum(dists) / n
  
     # Neighbourhood: 5 for large instances, up to 7 for small ones
-    if n <= 12:
-        nbr = 7
-    elif n <= 30:
-        nbr = 6
-    else:
-        nbr = 5          # never set to n — that's the bug we're fixing
+    nbr = min(20, max(5, n//10))
+    
+    # if n <= 12:
+    #     nbr = 7
+    # elif n <= 30:
+    #     nbr = 6
+    # else:
+    #     nbr = 5          # never set to n — that's the bug we're fixing
  
     # Iterations: fewer for large/hard instances (each call is slower)
     if n <= 12:
