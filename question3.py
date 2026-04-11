@@ -321,7 +321,7 @@ def run_lns(
         frozen_mask = [False] * len(agents)
  
     best_paths = [list(p) for p in paths]
-    best_delay = total_delay(agents, best_paths, (max_timestep/len(agents)).round())
+    best_delay = total_delay(agents, best_paths, ((max_timestep/len(agents)).round()).float())
  
     if start_time == 0:
         plannable = [i for i in range(len(agents)) if not frozen_mask[i]]
