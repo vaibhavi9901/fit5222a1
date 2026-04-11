@@ -109,21 +109,18 @@ def space_time_astar(
     search_start_time = time.time()
 
     open_heap = [(h_dist[start], 0, start[0], start[1], start_dir, start_time)]
-    visited: dict = {}
-    parent: dict = {(start[0], start[1], start_dir, start_time): None}
+    #visited: dict = {}
+    #parent: dict = {(start[0], start[1], start_dir, start_time): None}
+    visited = set()
+    parent = {(start[0], start[1], start_dir, start_time): None}
  
-    while open_heap:
-        # Check time limit BEFORE each node expansion
-        if time_limit is not None and (time.time() - search_start_time) > time_limit:
-            # Timeout - return empty path
-            return []
-        
+    while open_heap:     
         f, g, x, y, direction, t = heapq.heappop(open_heap)
         state = (x, y, direction, t)
  
-        if state in visited and visited[state] <= g:
+        if state in visited:
             continue
-        visited[state] = g
+        visited.add(state)
  
         if (x, y) == goal:
             path = []
@@ -134,6 +131,8 @@ def space_time_astar(
                 cur = parent[cur]
             path.reverse()
             return path
+        
+        
  
         if t >= max_timestep:
             continue
