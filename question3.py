@@ -73,13 +73,13 @@ def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
                 return True
             if p[t + 1] == cur_loc and p[t] == new_loc:    # edge (swap)
                 return True
-        # else:
-        #     # Agent is parked at goal indefinitely — block that cell
-        #     if p[-1] == new_loc: return True
-        elif not agents_removed_at_target:
-            # Only block parked goal cell if agent stays on map
-            if p[-1] == new_loc:
-                return True
+        else:
+            # Agent is parked at goal indefinitely — block that cell
+            if p[-1] == new_loc: return True
+        # elif not agents_removed_at_target:
+        #     # Only block parked goal cell if agent stays on map
+        #     if p[-1] == new_loc:
+        #         return True
     return False
  
  
