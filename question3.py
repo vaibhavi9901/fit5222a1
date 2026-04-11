@@ -27,9 +27,9 @@ debug = True
 visualizer = False
 
 # If you want to test on specific instance, turn test_single_instance to True and specify the level and test number
-test_single_instance = False
-level = 0
-test = 0
+test_single_instance = True
+level = 3
+test = 6
 
 def bfs_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
     """
@@ -170,7 +170,7 @@ def space_time_astar(
 # ── LNS parameters ───────────────────────────────────────────────────────────
 LNS_ITERATIONS_INITIAL  = 1   # iterations in get_path
 LNS_NEIGHBOURHOOD_SIZE  = 5     # agents per LNS neighbourhood
-LNS_ITERATIONS_REPLAN   = 50    # iterations per replan call
+LNS_ITERATIONS_REPLAN   = 10    # iterations per replan call
 LNS_TIME_BUDGET         = 20.0  # seconds budget for LNS in get_path
 LNS_TIME_BUDGET_REPLAN  = 1.0   # seconds per replan call
 
@@ -285,12 +285,12 @@ def adapt_parameters(agents, h_dists, max_timestep):
         replan_budget = 2.0
     elif n <= 30:
         iters_initial = 10
-        iters_replan  = 50
+        iters_replan  = 10
         lns_budget    = max_timestep #15.0
         replan_budget = 1.5
     else:
         iters_initial = 20
-        iters_replan  = 50
+        iters_replan  = 10
         lns_budget    = max_timestep #12.0
         replan_budget = 1.0
  
@@ -336,7 +336,8 @@ def run_lns(
  
     no_improve = 0
     # Early-exit threshold: proportional to neighbourhood size, not fixed at 10
-    no_improve_limit = max(15, neighbourhood_size * 4)
+    #no_improve_limit = min(15, neighbourhood_size * 4)
+    no_improve_limit = 10
  
     for _ in range(iterations):
         if deadline is not None and time.time() > deadline:
@@ -380,7 +381,11 @@ def run_lns(
             if not new_path:
                 success = False
                 break
-            candidate_paths[nid] = new_path
+            #candidate_paths[nid] = new_path
+            if start_time > 0:
+                candidate_paths[nid] = best_paths[nid][:start_time] + new_path
+            else:
+                candidate_paths[nid] = new_path
  
         if not success:
             no_improve += 1
@@ -393,6 +398,7 @@ def run_lns(
             no_improve = 0
         else:
             no_improve += 1
+        
  
     return best_paths
  
@@ -476,43 +482,35 @@ def replan(agents, rail, current_timestep, existing_paths, max_timestep,
     replan_budget = cfg.get('replan_budget', LNS_TIME_BUDGET_REPLAN)
     nbr           = cfg.get('neighbourhood_size', LNS_NEIGHBOURHOOD_SIZE)
 
-    # ── Fix prefix for ALL active agents before doing anything else ───────
-    # If an agent was blocked, its actual position lags behind its planned
-    # path. Truncate and pad to actual position so no path has a jump.
+    # ── Step 1: Fix prefix for ALL active agents ──────────────────────────
     for agent in agents:
         i = agent.handle
         if agent.status in (2, 3) or agent.position is None:
             continue
         actual_pos = agent.position
         prefix = list(existing_paths[i][:current_timestep])
-        # Pad if path is short
         while len(prefix) < current_timestep:
             prefix.append(actual_pos)
-        # Override the last entry to match actual position
         if prefix and prefix[-1] != actual_pos:
             prefix[-1] = actual_pos
-        new_paths[i] = prefix  # suffix will be added below or by LNS
+        new_paths[i] = prefix  # suffix added below
 
     replan_set = set(failed_agents) | set(new_malfunction_agents)
 
-    # ── Fix malfunctioning/failed agents with forced waits + A* suffix ────
+    # ── Step 2: Fix malfunctioning/failed agents ──────────────────────────
     for agent_id in replan_set:
         agent = agents[agent_id]
         if agent.status in (2, 3) or agent.position is None:
             continue
-
         cur_pos, cur_dir = agent.position, agent.direction
         mal_dur = (agent.malfunction_data.get("malfunction", 0)
                    if agent.malfunction_data else 0)
-
-        prefix       = new_paths[agent_id][:current_timestep]  # already corrected above
-        wait_segment = [cur_pos] * (mal_dur + 1)
-        resume_t     = current_timestep + mal_dur
-
+        prefix       = new_paths[agent_id]
+        wait_segment = [cur_pos] * (mal_dur + 2)
+        resume_t     = current_timestep + mal_dur + 1
         if cur_pos == agent.target:
             new_paths[agent_id] = prefix + wait_segment
             continue
-
         constraints = [new_paths[i] for i in range(len(agents)) if i != agent_id]
         suffix = space_time_astar(
             cur_pos, cur_dir, agent.target, rail,
@@ -521,9 +519,39 @@ def replan(agents, rail, current_timestep, existing_paths, max_timestep,
         )
         new_paths[agent_id] = prefix + wait_segment + (suffix[1:] if suffix else [])
 
-    # ── LNS over all active agents ────────────────────────────────────────
+    # ── Step 3: Generate suffixes for ALL other active agents ─────────────
+    # Without this, prefix-only paths give false delay=0 and LNS rejects repairs
+    for i, agent in enumerate(agents):
+        if agent.status in (2, 3) or agent.position is None:
+            continue
+        if i in replan_set:
+            continue
+        if len(new_paths[i]) > current_timestep:
+            continue
+
+        # If agent is still exactly on its planned path, reuse the existing suffix.
+        # This preserves the conflict-free structure from get_path and avoids the
+        # ordering problem where earlier agents don't see later agents' future paths.
+        if (current_timestep < len(existing_paths[i])
+                and agent.position == existing_paths[i][current_timestep]):
+            new_paths[i] = new_paths[i] + existing_paths[i][current_timestep:]
+            continue
+
+        # Agent deviated from plan — must replan its suffix.
+        # Process in reverse index order so higher-indexed agents (like 34) are
+        # planned first when they're closer to conflict zones.
+        constraints = [new_paths[j] for j in range(len(agents)) if j != i]
+        suffix = space_time_astar(
+            agent.position, agent.direction, agent.target, rail,
+            constraints, max_timestep, h_dists[i],
+            start_time=current_timestep, time_limit=astar_lim,
+        )
+        if suffix:
+            new_paths[i] = new_paths[i] + suffix
+
+    # ── Step 4: LNS improvement ───────────────────────────────────────────
     frozen_mask = [
-        agent.status in (2, 3) or agent.position is None
+        agent.status in (2, 3) or agent.position is None or (agent.malfunction_data and agent.malfunction_data.get("malfunction", 0) > 0)
         for agent in agents
     ]
     new_paths = run_lns(
