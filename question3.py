@@ -590,20 +590,20 @@ def replan(agents, rail, current_timestep, existing_paths, max_timestep,
 
 
     # Joint LNS planning ───────────────────────────────────────────
-    # frozen_mask = [True] * len(agents)
+    frozen_mask = [True] * len(agents)
     
-    # for i in replan_set:
-    #     frozen_mask[i] = False  # only these agents can change
+    for i in replan_set:
+        frozen_mask[i] = False  # only these agents can change
 
-    # new_paths = run_lns(
-    #     agents, rail, new_paths, h_dists, max_timestep,
-    #     iterations=iters_replan,
-    #     neighbourhood_size=max(nbr, len(replan_set)),  # stronger coordination
-    #     start_time=current_timestep,
-    #     frozen_mask=frozen_mask,
-    #     deadline=time.time() + replan_budget,
-    #     astar_limit=astar_lim,
-    # )
+    new_paths = run_lns(
+        agents, rail, new_paths, h_dists, max_timestep,
+        iterations=iters_replan,
+        neighbourhood_size=len(replan_set),  # stronger coordination
+        start_time=current_timestep,
+        frozen_mask=frozen_mask,
+        deadline=time.time() + replan_budget,
+        astar_limit=astar_lim,
+    )
 
     return new_paths
 
