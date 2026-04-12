@@ -454,74 +454,86 @@ def get_path_worker(queue, agents, rail, max_timestep):
     except Exception as e:
         queue.put(e)
 
-def get_path(agents, rail, max_timestep):
-    global _cfg
-    n = len(agents)
-    path_all = [[] for _ in range(n)]
- 
-    # Precompute heuristics once — reused by slack order AND A*
+def _plan_single(args):
+    """
+    One complete PP + LNS run with a given random seed.
+    Runs in a worker process — must be a top-level function for pickling.
+    """
+    agents, rail, max_timestep, seed = args
+    random.seed(seed)
+
     h_dists = precompute_heuristics(agents, rail)
- 
-    # Adapt parameters to this instance
-    _cfg = adapt_parameters(agents, h_dists, max_timestep)
-    nbr         = _cfg['neighbourhood_size']
-    astar_lim   = _cfg['astar_limit']
-    lns_budget  = _cfg['lns_budget']
-    iters       = _cfg['iters_initial']
- 
-    budget_deadline = time.time() + lns_budget
- 
-    # Phase 1: Prioritised Planning (slack order, uses precomputed h_dists)
-    order = compute_slack_order(agents, h_dists, max_timestep)
-    planned = []
+    cfg     = adapt_parameters(agents, h_dists, max_timestep)
+    nbr     = cfg['neighbourhood_size']
+    astar_lim = cfg['astar_limit']
+    iters   = cfg['iters_initial']
+
+    # Each worker uses a different priority ordering:
+    #   seed 0 → slack order (paper's method)
+    #   seed 1 → earliest deadline first
+    #   seed 2 → longest path first
+    #   seed 3 → random shuffle
+    if seed == 0:
+        order = compute_slack_order(agents, h_dists, max_timestep)
+    elif seed == 1:
+        order = sorted(range(len(agents)),
+                       key=lambda i: agents[i].deadline or max_timestep)
+    elif seed == 2:
+        order = sorted(range(len(agents)),
+                       key=lambda i: -h_dists[i].get(
+                           agents[i].initial_position, 0))
+    else:
+        order = list(range(len(agents)))
+        random.shuffle(order)
+
+    # Phase 1: PP
+    path_all = [[] for _ in range(len(agents))]
+    planned  = []
     for agent_id in order:
         agent = agents[agent_id]
-        # if time.time() > budget_deadline:
-        #     break
-        # agent = agents[agent_id]
-
-        if len(agents) >=75 and len(agents) < 150:
-            path = space_time_astar(
-                agent.initial_position, agent.initial_direction,
-                agent.target, rail, planned, 100,
-                h_dists[agent_id], start_time=0, time_limit=astar_lim,
-            )
-        
-        elif len(agents) >=25 and len(agents) <= 37:
-            path = space_time_astar(
-                agent.initial_position, agent.initial_direction,
-                agent.target, rail, planned, 1000,
-                h_dists[agent_id], start_time=0, time_limit=astar_lim,
-            )
-        
-        elif len(agents) >=150:
-            path = space_time_astar(
-                agent.initial_position, agent.initial_direction,
-                agent.target, rail, planned, 100,
-                h_dists[agent_id], start_time=0, time_limit=astar_lim,
-            )
-        
-        else:
-            path = space_time_astar(
-                agent.initial_position, agent.initial_direction,
-                agent.target, rail, planned, max_timestep,
-                h_dists[agent_id], start_time=0, time_limit=astar_lim,
-            )
+        path  = space_time_astar(
+            agent.initial_position, agent.initial_direction,
+            agent.target, rail, planned, max_timestep,
+            h_dists[agent_id], start_time=0, time_limit=astar_lim,
+        )
         path_all[agent_id] = path
         planned.append(path)
- 
+
     # Phase 2: LNS improvement
-    if time.time() < budget_deadline:
-        path_all = run_lns(
-            agents, rail, path_all, h_dists, max_timestep,
-            iterations=iters,
-            neighbourhood_size=nbr,
-            start_time=0,
-            deadline=budget_deadline,
-            astar_limit=astar_lim,
-        )
- 
-    return path_all
+    path_all = run_lns(
+        agents, rail, path_all, h_dists, max_timestep,
+        iterations=iters, neighbourhood_size=nbr,
+        start_time=0,
+        deadline=time.time() + cfg['lns_budget'],
+        astar_limit=astar_lim,
+    )
+    return path_all, total_delay(agents, path_all, max_timestep)
+
+
+def get_path(agents, rail, max_timestep):
+    global _cfg
+
+    h_dists = precompute_heuristics(agents, rail)
+    _cfg    = adapt_parameters(agents, h_dists, max_timestep)
+
+    NUM_WORKERS = min(4, mp.cpu_count())
+
+    # Each worker gets a different seed → different priority ordering
+    task_args = [(agents, rail, max_timestep, seed)
+                 for seed in range(NUM_WORKERS)]
+
+    try:
+        with mp.Pool(processes=NUM_WORKERS) as pool:
+            results = pool.map(_plan_single, task_args)
+        # Pick whichever worker found the lowest total delay
+        best_paths, best_delay = min(results, key=lambda r: r[1])
+        return best_paths
+
+    except Exception as e:
+        # Fallback: if multiprocessing fails (e.g. pickling error), run serially
+        eprint(f"Parallel planning failed ({e}), falling back to serial")
+        best_paths, _ = _plan_single((agents, rail, max_timestep, 0))
+        return best_paths
  
  
 # ════════════════════════════════════════════════════════════════════════════
@@ -544,6 +556,8 @@ def replan(agents, rail, current_timestep, existing_paths, max_timestep,
         i = agent.handle
         if agent.status in (2, 3) or agent.position is None:
             continue
+        if agent.target:
+            get_or_compute_heuristic(agent.target, rail)
         actual_pos = agent.position
         prefix = list(existing_paths[i][:current_timestep])
         while len(prefix) < current_timestep:
