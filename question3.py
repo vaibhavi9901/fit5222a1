@@ -705,6 +705,14 @@ def replan(
             start_time=resume_t,
             deadline=agent.deadline,
             )
+        
+        elif len(agents) == 25 or len(agents) == 37:
+            suffix = space_time_astar(
+            cur_pos, cur_dir, agent.target,
+            rail, constraints, 500, h_dist,
+            start_time=resume_t,
+            deadline=agent.deadline,
+            )
 
         elif len(agents) >=150:
             suffix = space_time_astar(
