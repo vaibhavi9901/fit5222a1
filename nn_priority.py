@@ -71,16 +71,13 @@ class AgentPriorityNet:
     def forward(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=np.float64)
         X = np.clip(X, -2.0, 2.0)
-        # Clip weights before matmul — prevents overflow warning even if
-        # weights are large-but-finite (e.g. from a corrupted .npz)
-        W1 = np.clip(self.W1, -10.0, 10.0)
-        W2 = np.clip(self.W2, -10.0, 10.0)
-        W3 = np.clip(self.W3, -10.0, 10.0)
-        z1 = X @ W1 + self.b1
-        a1 = self._relu(np.clip(z1, -50.0, 50.0))
-        z2 = a1 @ W2 + self.b2
-        a2 = self._relu(np.clip(z2, -50.0, 50.0))
-        out = (a2 @ W3 + self.b3).squeeze(-1)
+        # No weight clipping here — forward must match the training computation
+        # exactly (train_step clips pre-activations to ±10, not weights).
+        z1 = X @ self.W1 + self.b1
+        a1 = self._relu(np.clip(z1, -10.0, 10.0))
+        z2 = a1 @ self.W2 + self.b2
+        a2 = self._relu(np.clip(z2, -10.0, 10.0))
+        out = (a2 @ self.W3 + self.b3).squeeze(-1)
         if not np.all(np.isfinite(out)):
             return X[:, 2]   # fallback to analytic slack
         return out
@@ -123,15 +120,13 @@ class AgentPriorityNet:
         n = X.shape[0]
         self._t += 1
 
-        # Forward with clipping
+        # Forward — matches forward() exactly: clip pre-activations, ReLU, no weight clip
         z1 = X @ self.W1 + self.b1
         z1 = np.clip(z1, -10.0, 10.0)
-        a1 = self._relu(z1)
-        a1 = np.clip(a1, 0.0, 10.0)
+        a1 = self._relu(z1)          # a1 in [0, 10] — no redundant clip needed
         z2 = a1 @ self.W2 + self.b2
         z2 = np.clip(z2, -10.0, 10.0)
-        a2 = self._relu(z2)
-        a2 = np.clip(a2, 0.0, 10.0)
+        a2 = self._relu(z2)          # a2 in [0, 10]
         z3 = a2 @ self.W3 + self.b3
         z3 = np.clip(z3, -10.0, 10.0)
         pred = z3.squeeze(-1)
@@ -141,7 +136,8 @@ class AgentPriorityNet:
         if not np.isfinite(loss):
             return 0.0
 
-        # Backward (gradients computed from the clipped values)
+        # Backward — mask accounts for BOTH ReLU (z>0) AND upper clip (z<10)
+        # so gradient is zero wherever the clip was saturating at +10.
         dout = (2.0 / n) * diff
         dout3 = dout[:, None]
 
@@ -149,12 +145,12 @@ class AgentPriorityNet:
         db3 = dout3.sum(axis=0)
         da2 = dout3 @ self.W3.T
 
-        dz2 = da2 * (z2 > 0)
+        dz2 = da2 * ((z2 > 0) & (z2 < 10.0))   # correct clip+ReLU mask
         dW2 = a1.T @ dz2
         db2 = dz2.sum(axis=0)
         da1 = dz2 @ self.W2.T
 
-        dz1 = da1 * (z1 > 0)
+        dz1 = da1 * ((z1 > 0) & (z1 < 10.0))   # correct clip+ReLU mask
         dW1 = X.T @ dz1
         db1 = dz1.sum(axis=0)
 
@@ -177,20 +173,18 @@ class AgentPriorityNet:
         n = X.shape[0]
         self._t += 1
 
-        # Forward with clipping
+        # Forward — matches forward() exactly
         z1 = X @ self.W1 + self.b1
         z1 = np.clip(z1, -10.0, 10.0)
-        a1 = self._relu(z1)
-        a1 = np.clip(a1, 0.0, 10.0)
+        a1 = self._relu(z1)          # a1 in [0, 10]
         z2 = a1 @ self.W2 + self.b2
         z2 = np.clip(z2, -10.0, 10.0)
-        a2 = self._relu(z2)
-        a2 = np.clip(a2, 0.0, 10.0)
+        a2 = self._relu(z2)          # a2 in [0, 10]
         z3 = a2 @ self.W3 + self.b3
         z3 = np.clip(z3, -10.0, 10.0)
         z3 = z3.squeeze(-1)
 
-        # Vectorised pairwise hinge loss (unchanged)
+        # Vectorised pairwise hinge loss
         score_diff = z3[:, None] - z3[None, :]
         rank_diff = ranks[:, None] - ranks[None, :]
         should_be_first = rank_diff < 0
@@ -200,21 +194,26 @@ class AgentPriorityNet:
         if not np.isfinite(loss):
             return 0.0
 
-        # Gradient and backward (unchanged)
+        # Gradient of hinge w.r.t. z3 scores
         active = (hinge > 0)
         dz3 = (active.sum(axis=1) - active.sum(axis=0)) / max(1, n_pairs)
+
+        # NaN guard on gradients — if dz3 is bad, Adam buffers would be
+        # permanently corrupted, so bail out before touching any weights.
+        if not np.all(np.isfinite(dz3)):
+            return 0.0
 
         dout3 = dz3[:, None]
         dW3 = a2.T @ dout3
         db3 = dout3.sum(axis=0)
         da2 = dout3 @ self.W3.T
 
-        dz2 = da2 * (z2 > 0)
+        dz2 = da2 * ((z2 > 0) & (z2 < 10.0))   # correct clip+ReLU mask
         dW2 = a1.T @ dz2
         db2 = dz2.sum(axis=0)
         da1 = dz2 @ self.W2.T
 
-        dz1 = da1 * (z1 > 0)
+        dz1 = da1 * ((z1 > 0) & (z1 < 10.0))   # correct clip+ReLU mask
         dW1 = X.T @ dz1
         db1 = dz1.sum(axis=0)
 
