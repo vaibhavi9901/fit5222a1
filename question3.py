@@ -4,6 +4,7 @@ from typing import List, Tuple, Dict, Optional
 import glob, os, sys,time,json, heapq, random
 from collections import deque
 import multiprocessing as mp
+import numpy as np
 
 #import necessary modules that this python scripts need.
 try:
@@ -16,34 +17,50 @@ except Exception as e:
     exit(1)
 
 
-
-
 #########################
 # Debugger and visualizer options
 #########################
 
 # Set these debug option to True if you want more information printed
+test_single_instance = False
+level = 1
+test = 1
 debug = False
 visualizer = False
 
-# If you want to test on specific instance, turn test_single_instance to True and specify the level and test number
-test_single_instance = False
-level = 5
-test = 4
+np.errstate(all='ignore')
 
+# ── Neural-network priority module ──────────────────────────────────────────
+_NN_AVAILABLE = False
+_priority_net = None
+try:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, _script_dir)
+    from nn_priority import AgentPriorityNet, extract_features as _extract_nn_features
+    _priority_net = AgentPriorityNet()
+    _model_path = os.path.join(_script_dir, "model_weights.npz")
+    if _priority_net.load(_model_path):
+        _NN_AVAILABLE = True
+    else:
+        eprint("[solution] model_weights.npz not found — "
+               "run train_priority_nn.py to generate it. "
+               "Falling back to 4-seed baseline.")
+except Exception as e:
+    eprint(f"[solution] NN module unavailable ({e}). Using 4-seed baseline.")
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+#  BFS heuristic cache
+# ─────────────────────────────────────────────────────────────────────────────
 _heuristic_cache: Dict[tuple, dict] = {}
-
+ 
+ 
 def get_or_compute_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
-    """Return cached BFS distance map for goal, computing it only once."""
     if goal not in _heuristic_cache:
         _heuristic_cache[goal] = bfs_heuristic(goal, rail)
     return _heuristic_cache[goal]
-
+ 
+ 
 def bfs_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
-    """
-    Backward BFS from goal (direction-agnostic).
-    Returns {(x,y): min_steps_to_goal}. Admissible h for Space-Time A*.
-    """
     dist = {goal: 0}
     q = deque([goal])
     while q:
@@ -63,35 +80,29 @@ def bfs_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
     return dist
  
  
-# def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
-#                  constraint_paths: list) -> bool:
+# ─────────────────────────────────────────────────────────────────────────────
+#  Conflict detection
+# ─────────────────────────────────────────────────────────────────────────────
 def has_conflict(new_loc: tuple, cur_loc: tuple, t: int,
                  constraint_paths: list,
                  agents_removed_at_target: bool = True) -> bool:
-    """
-    Vertex and edge conflict check against already-planned paths.
-    Agents removed at target are gone from the map, so we only block
-    cells while the other agent's path is still active (t+1 < len(p)).
-    """
     for p in constraint_paths:
         if not p:
             continue
         if t + 1 < len(p):
-            if p[t + 1] == new_loc:                         # vertex conflict
+            if p[t + 1] == new_loc:
                 return True
-            if p[t + 1] == cur_loc and p[t] == new_loc:    # edge (swap)
+            if p[t + 1] == cur_loc and p[t] == new_loc:
                 return True
         else:
-            # Agent is parked at goal indefinitely — block that cell
-            if p[-1] == new_loc: return True
-        # elif not agents_removed_at_target:
-        #     # Only block parked goal cell if agent stays on map
-        #     if p[-1] == new_loc:
-        #         return True
+            if p[-1] == new_loc:
+                return True
     return False
  
-
-
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Space-Time A*
+# ─────────────────────────────────────────────────────────────────────────────
 def space_time_astar(
     start: tuple,
     start_dir: int,
@@ -102,48 +113,30 @@ def space_time_astar(
     h_dist: dict,
     start_time: int = 0,
     time_limit: float = None,
-    deadline: int = None,        # NEW: used for deadline-aware f cost
+    deadline: int = None,
 ) -> list:
-    """
-    Space-Time A* with wait actions and deadline-aware cost.
-
-    Fixes applied vs previous version:
-      - visited is a plain set(); a separate best_g dict gates re-pushes.
-      - parent is only updated when a strictly cheaper path to ns is found.
-      - time.time() sampled every 500 expansions, not every node.
-      - Timeout returns a wait-in-place path instead of [], preventing cascades.
-      - f = g + h + 2*delay so the search naturally avoids deadline penalties.
-    """
     if start not in h_dist:
         return []
-
     search_start_wall = time.time()
     expansion_count = 0
-
-    # heap entry: (f, g, x, y, direction, t)
     start_state = (start[0], start[1], start_dir, start_time)
     open_heap = [(h_dist[start], 0, start[0], start[1], start_dir, start_time)]
-
     visited = set()
     best_g: Dict[tuple, int] = {start_state: 0}
     parent: Dict[tuple, Optional[tuple]] = {start_state: None}
-
+ 
     while open_heap:
-        # Check wall-clock timeout every 500 expansions
         expansion_count += 1
         if time_limit is not None and expansion_count % 500 == 0:
             if time.time() - search_start_wall > time_limit:
-                # Fallback: wait in place for the rest of the horizon
                 return [start] * (max_timestep - start_time + 1)
-
+ 
         f, g, x, y, direction, t = heapq.heappop(open_heap)
         state = (x, y, direction, t)
-
         if state in visited:
             continue
         visited.add(state)
-
-        # Goal check — first expansion is optimal with a consistent heuristic
+ 
         if (x, y) == goal:
             path = []
             cur = state
@@ -153,14 +146,13 @@ def space_time_astar(
                 cur = parent[cur]
             path.reverse()
             return path
-
+ 
         if t >= max_timestep:
             continue
-
+ 
         cur_loc = (x, y)
-
+ 
         def try_push(nx, ny, new_dir, new_t, new_g):
-            """Push neighbor onto heap if it improves best known cost."""
             ns = (nx, ny, new_dir, new_t)
             if ns in visited:
                 return
@@ -170,13 +162,11 @@ def space_time_astar(
                 new_h = h_dist.get((nx, ny))
                 if new_h is None:
                     return
-                # Deadline-aware penalty: 2× each timestep past deadline
                 delay = max(0, new_t - deadline) if deadline is not None else 0
                 heapq.heappush(open_heap,
                                (new_g + new_h + 2 * delay,
                                 new_g, nx, ny, new_dir, new_t))
-
-        # Move actions
+ 
         for action, valid in enumerate(rail.get_transitions(x, y, direction)):
             if not valid:
                 continue
@@ -185,34 +175,41 @@ def space_time_astar(
             elif action == Directions.EAST:  ny += 1
             elif action == Directions.SOUTH: nx += 1
             elif action == Directions.WEST:  ny -= 1
-
             if has_conflict((nx, ny), cur_loc, t, constraint_paths):
                 continue
             if (nx, ny) not in h_dist:
                 continue
             try_push(nx, ny, action, t + 1, g + 1)
-
-        # Wait action
+ 
         if not has_conflict(cur_loc, cur_loc, t, constraint_paths):
             try_push(x, y, direction, t + 1, g + 1)
-
+ 
     return []
-
-# parallel processing
+ 
+ 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Parallel worker  (called in subprocess — no side effects on main process)
+# ─────────────────────────────────────────────────────────────────────────────
 def _plan_worker(args):
     """
     One complete Cooperative A* run with a specific priority ordering.
-    seed selects the ordering:
-      0 → EDF + distance tiebreak  (original)
-      1 → slack-based              (Chen et al. 2023)
+ 
+    seed:
+      0 → EDF + distance tiebreak
+      1 → slack-based (tightest margin first)
       2 → longest path first
       3 → random shuffle
-    Returns (path_all, (failed_count, total_cost)).
+      4 → NN-predicted priority  (only used when _NN_AVAILABLE is True)
+          nn_features is passed as args[4] when seed == 4
     """
-    agents, rail, max_timestep, seed = args
+    if len(args) == 5:
+        agents, rail, max_timestep, seed, nn_features = args
+    else:
+        agents, rail, max_timestep, seed = args
+        nn_features = None
  
-    # Each worker has its own local BFS cache — never touches _heuristic_cache
     local_cache: Dict[tuple, dict] = {}
+ 
     def local_h(goal):
         if goal not in local_cache:
             local_cache[goal] = bfs_heuristic(goal, rail)
@@ -221,564 +218,149 @@ def _plan_worker(args):
     n = len(agents)
     path_all = [[] for _ in range(n)]
  
+    def h(i):
+        return local_h(agents[i].target).get(agents[i].initial_position,
+                                              max_timestep)
+ 
+    def ddl(i):
+        return (agents[i].deadline if agents[i].deadline is not None
+                else max_timestep)
+ 
     if seed == 0:
-        # Original: earliest deadline first, distance tiebreak
-        order = sorted(range(n), key=lambda i: (
-            agents[i].deadline if agents[i].deadline is not None else max_timestep,
-            local_h(agents[i].target).get(agents[i].initial_position, max_timestep)
-        ))
+        order = sorted(range(n), key=lambda i: (ddl(i), h(i)))
     elif seed == 1:
-        # Slack-based: deadline - distance, ascending (tightest margin first)
-        order = sorted(range(n), key=lambda i: (
-            (agents[i].deadline if agents[i].deadline is not None else max_timestep)
-            - local_h(agents[i].target).get(agents[i].initial_position, max_timestep)
-        ))
+        order = sorted(range(n), key=lambda i: ddl(i) - h(i))
     elif seed == 2:
-        # Longest path first — most constrained agents plan unobstructed
-        order = sorted(range(n), key=lambda i: (
-            -local_h(agents[i].target).get(agents[i].initial_position, 0)
-        ))
-    else:
-        # Random — escapes systematic bias of the deterministic orderings
+        order = sorted(range(n), key=lambda i: -h(i))
+    elif seed == 3:
         order = list(range(n))
-        random.seed(seed * 17)
+        random.seed(42)
         random.shuffle(order)
+    elif seed == 4 and nn_features is not None:
+        # NN ordering: use pre-computed feature matrix
+        try:
+            # Reconstruct a local model (worker has forked parent's state)
+            from nn_priority import AgentPriorityNet
+            local_net = AgentPriorityNet()
+            model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "model_weights.npz")
+            local_net.load(model_path)
+            scores = local_net.forward(nn_features)
+            order = np.argsort(scores).tolist()
+        except Exception:
+            # Fallback to EDF
+            order = sorted(range(n), key=lambda i: (ddl(i), h(i)))
+    else:
+        order = sorted(range(n), key=lambda i: (ddl(i), h(i)))
+ 
+    # Per-agent time budget: scale so total worker stays under ~30s.
+    per_agent_limit = max(1.0, min(10.0, 30.0 / max(1, n)))
+    worker_start = time.time()
  
     planned: List[list] = []
     for agent_id in order:
         agent = agents[agent_id]
+        if agent.initial_position is None or agent.target is None:
+            planned.append([])
+            continue
+ 
+        # Remaining wall-clock budget for this agent
+        elapsed = time.time() - worker_start
+        remaining = len(order) - len(planned)
+        time_left = max(0.5, per_agent_limit * remaining - elapsed)
+ 
         h_dist = local_h(agent.target)
         path = space_time_astar(
-            agent.initial_position,
-            agent.initial_direction,
-            agent.target,
-            rail,
-            planned,
-            max_timestep,
-            h_dist,
-            start_time=0,
-            deadline=agent.deadline,
+            agent.initial_position, agent.initial_direction,
+            agent.target, rail, planned, max_timestep, h_dist,
+            start_time=0, deadline=agent.deadline,
+            time_limit=min(per_agent_limit, time_left),
         )
+        # If A* timed out (all positions same = wait-in-place), retry with
+        # no constraints so the agent at least reaches its goal.
+        if path and len(set(path)) == 1:
+            path_free = space_time_astar(
+                agent.initial_position, agent.initial_direction,
+                agent.target, rail, [], max_timestep, h_dist,
+                start_time=0, deadline=agent.deadline, time_limit=2.0,
+            )
+            if path_free:
+                path = path_free
+ 
         path_all[agent_id] = path
         planned.append(path)
  
-    # Quality: fewest failures first, then shortest total cost
     failed = sum(1 for p in path_all if not p)
     cost   = sum(len(p) - 1 for p in path_all if p)
     return path_all, (failed, cost)
-
-########### LNS-based planning ###############
-
-# # ── LNS parameters ───────────────────────────────────────────────────────────
-# LNS_ITERATIONS_INITIAL  = 1   # iterations in get_path
-# LNS_NEIGHBOURHOOD_SIZE  = 5     # agents per LNS neighbourhood
-# LNS_ITERATIONS_REPLAN   = 10    # iterations per replan call
-# LNS_TIME_BUDGET         = 20.0  # seconds budget for LNS in get_path
-# LNS_TIME_BUDGET_REPLAN  = 1.0   # seconds per replan call
-
-# def precompute_heuristics(agents: List[EnvAgent],
-#                           rail: GridTransitionMap) -> List[dict]:
-#     """BFS heuristic for every agent, cached by goal cell."""
-#     cache: Dict[tuple, dict] = {}
-#     result = []
-#     for agent in agents:
-#         if agent.target not in cache:
-#             cache[agent.target] = bfs_heuristic(agent.target, rail)
-#         result.append(cache[agent.target])
-#     return result
-
-# # ════════════════════════════════════════════════════════════════════════════
-# #  Slack-based priority ordering   (Chen et al. §"Slack Based Priority")
-# # ════════════════════════════════════════════════════════════════════════════
-
-# def compute_slack_order(agents, h_dists, max_timestep):
-#     """
-#     slack_i = deadline_i - earliest_possible_arrival_i
-#     Uses already-computed h_dists — does NOT rerun BFS.
-#     """
-#     slacks = []
-#     for i, agent in enumerate(agents):
-#         earliest = h_dists[i].get(agent.initial_position, max_timestep)
-#         ddl = agent.deadline if agent.deadline is not None else max_timestep
-#         slack = ddl - earliest
-#         slacks.append((slack, earliest, i))
-#     slacks.sort()
-#     return [i for _, _, i in slacks]
  
  
-# # ════════════════════════════════════════════════════════════════════════════
-# #  Delay metric
-# # ════════════════════════════════════════════════════════════════════════════
- 
-# def agent_delay(agent, path, max_timestep):
-#     if not path:
-#         return max_timestep
-#     ddl = agent.deadline if agent.deadline is not None else max_timestep
-#     return max(0, len(path) - 1 - ddl)
- 
- 
-# def total_delay(agents, paths, max_timestep):
-#     return sum(agent_delay(agents[i], paths[i], max_timestep)
-#                for i in range(len(agents)))
- 
- 
-# # ════════════════════════════════════════════════════════════════════════════
-# #  LNS neighbourhood  — FIX: windowed scan, not full path scan
-# # ════════════════════════════════════════════════════════════════════════════
- 
-# def find_blocking_agents(focus_id, paths, neighbourhood_size, start_time=0):
-#     focus_path = paths[focus_id]
-#     if not focus_path:
-#         return [focus_id]
- 
-#     # FIX: only scan a 60-step window, not the entire path
-#     window_start = start_time
-#     window_end   = min(len(focus_path), start_time + 60)
-#     focus_cells  = set(focus_path[window_start:window_end])
- 
-#     overlap_count = {}
-#     for other_id, p in enumerate(paths):
-#         if other_id == focus_id or not p:
-#             continue
-#         for cell in p[window_start:min(len(p), window_end)]:
-#             if cell in focus_cells:
-#                 overlap_count[other_id] = overlap_count.get(other_id, 0) + 1
- 
-#     ranked = sorted(overlap_count.items(), key=lambda x: -x[1])
-#     return [focus_id] + [aid for aid, _ in ranked[:neighbourhood_size - 1]]
- 
-# # ════════════════════════════════════════════════════════════════════════════
-# #  Adaptive parameters based on instance properties
-# # ════════════════════════════════════════════════════════════════════════════
- 
-# def adapt_parameters(agents, h_dists, max_timestep):
-#     """
-#     Detect instance difficulty and return adapted parameters.
-#     Avoids the two extremes: neighbourhood too large (slow) or too small
-#     (can't escape local optima).
-#     """
-#     n = len(agents)
-#     slacks, dists = [], []
-#     for i, agent in enumerate(agents):
-#         dist = h_dists[i].get(agent.initial_position, max_timestep)
-#         ddl  = agent.deadline if agent.deadline is not None else max_timestep
-#         slacks.append(ddl - dist)
-#         dists.append(dist)
- 
-#     min_slack  = min(slacks)
-#     tight_ratio = sum(1 for s in slacks if s < 20) / n
-#     mean_dist  = sum(dists) / n
- 
-#     # Neighbourhood
-#     nbr = min(20, max(5, n//10))
-    
-#     # if n <= 12:
-#     #     nbr = 7
-#     # elif n <= 30:
-#     #     nbr = 6
-#     # else:
-#     #     nbr = 5          # never set to n — that's the bug we're fixing
- 
-#     # Iterations: fewer for large/hard instances (each call is slower)
-#     if n <= 12:
-#         iters_initial = 20
-#         iters_replan  = 50
-#         lns_budget    = max_timestep #25.0
-#         replan_budget = 2.0
-#     elif n <= 30:
-#         iters_initial = 10
-#         iters_replan  = 10
-#         lns_budget    = max_timestep #15.0
-#         replan_budget = 1.5
-#     else:
-#         iters_initial = 20
-#         iters_replan  = 10
-#         lns_budget    = max_timestep #12.0
-#         replan_budget = 1.0
- 
-#     # A* time limit per call scales with mean path length
-#     astar_limit = min(2.0, max(0.5, mean_dist / 30.0))
- 
-#     return dict(
-#         neighbourhood_size  = nbr,
-#         iters_initial       = iters_initial,
-#         iters_replan        = iters_replan,
-#         lns_budget          = lns_budget,
-#         replan_budget       = replan_budget,
-#         astar_limit         = astar_limit,
-#     )
- 
- 
-# # ════════════════════════════════════════════════════════════════════════════
-# #  Core LNS loop
-# # ════════════════════════════════════════════════════════════════════════════
- 
-# def run_lns(
-#     agents, rail, paths, h_dists, max_timestep,
-#     iterations, neighbourhood_size,
-#     start_time=0, frozen_mask=None, deadline=None,
-#     astar_limit=1.0,
-# ):
-#     if frozen_mask is None:
-#         frozen_mask = [False] * len(agents)
- 
-#     best_paths = [list(p) for p in paths]
-#     best_delay = total_delay(agents, best_paths, max_timestep)
- 
-#     if start_time == 0:
-#         plannable = [i for i in range(len(agents)) if not frozen_mask[i]]
-#     else:
-#         plannable = [i for i in range(len(agents))
-#                      if not frozen_mask[i]
-#                      and agents[i].position is not None
-#                      and agents[i].status not in (2, 3)]
- 
-#     if not plannable:
-#         return best_paths
- 
-#     no_improve = 0
-#     # Early-exit threshold: proportional to neighbourhood size, not fixed at 10
-#     #no_improve_limit = min(15, neighbourhood_size * 4)
-#     no_improve_limit = 10
- 
-#     for _ in range(iterations):
-#         if deadline is not None and time.time() > deadline:
-#             break
-#         if no_improve >= no_improve_limit:
-#             break
- 
-#         late = [i for i in plannable
-#                 if agent_delay(agents[i], best_paths[i], max_timestep) > 0]
-#         focus_id = random.choice(late) if late else random.choice(plannable)
- 
-#         neighbourhood = find_blocking_agents(
-#             focus_id, best_paths, neighbourhood_size, start_time)
-#         neighbourhood = [i for i in neighbourhood if not frozen_mask[i]]
-#         if not neighbourhood:
-#             continue
-#         random.shuffle(neighbourhood)
- 
-#         candidate_paths = [list(p) for p in best_paths]
-#         for nid in neighbourhood:
-#             candidate_paths[nid] = []
- 
-#         success = True
-#         for nid in neighbourhood:
-#             agent = agents[nid]
-#             if start_time == 0:
-#                 pos, d = agent.initial_position, agent.initial_direction
-#             else:
-#                 pos = agent.position if agent.position is not None \
-#                       else agent.initial_position
-#                 d   = agent.direction if agent.position is not None \
-#                       else agent.initial_direction
- 
-#             constraints = [candidate_paths[i]
-#                            for i in range(len(agents)) if i != nid]
-#             new_path = space_time_astar(
-#                 pos, d, agent.target, rail,
-#                 constraints, max_timestep, h_dists[nid],
-#                 start_time=start_time, time_limit=astar_limit,
-#             )
-#             if not new_path:
-#                 success = False
-#                 break
-#             #candidate_paths[nid] = new_path
-#             if start_time > 0:
-#                 candidate_paths[nid] = best_paths[nid][:start_time] + new_path
-#             else:
-#                 candidate_paths[nid] = new_path
- 
-#         if not success:
-#             no_improve += 1
-#             continue
- 
-#         new_delay = total_delay(agents, candidate_paths, max_timestep)
-#         if new_delay <= best_delay:
-#             best_paths = candidate_paths
-#             best_delay = new_delay
-#             no_improve = 0
-#         else:
-#             no_improve += 1
-        
- 
-#     return best_paths
- 
- 
-# # ════════════════════════════════════════════════════════════════════════════
-# #  Module-level config store (get_path → replan)
-# # ════════════════════════════════════════════════════════════════════════════
-# _cfg: dict = {}
- 
- 
-# # ════════════════════════════════════════════════════════════════════════════
-# #  get_path
-# # ════════════════════════════════════════════════════════════════════════════
-
- 
-# def get_path_worker(queue, agents, rail, max_timestep):
-#     try:
-#         result = get_path(agents, rail, max_timestep)
-#         queue.put(result)
-#     except Exception as e:
-#         queue.put(e)
-
-# def _plan_single(args):
-#     """
-#     One complete PP + LNS run with a given random seed.
-#     Runs in a worker process — must be a top-level function for pickling.
-#     """
-#     agents, rail, max_timestep, seed = args
-#     random.seed(seed)
-
-#     h_dists = precompute_heuristics(agents, rail)
-#     cfg     = adapt_parameters(agents, h_dists, max_timestep)
-#     nbr     = cfg['neighbourhood_size']
-#     astar_lim = cfg['astar_limit']
-#     iters   = cfg['iters_initial']
-
-#     # Each worker uses a different priority ordering:
-#     #   seed 0 → slack order (paper's method)
-#     #   seed 1 → earliest deadline first
-#     #   seed 2 → longest path first
-#     #   seed 3 → random shuffle
-#     if seed == 0:
-#         order = compute_slack_order(agents, h_dists, max_timestep)
-#     elif seed == 1:
-#         order = sorted(range(len(agents)),
-#                        key=lambda i: agents[i].deadline or max_timestep)
-#     elif seed == 2:
-#         order = sorted(range(len(agents)),
-#                        key=lambda i: -h_dists[i].get(
-#                            agents[i].initial_position, 0))
-#     else:
-#         order = list(range(len(agents)))
-#         random.shuffle(order)
-
-#     # Phase 1: PP
-#     path_all = [[] for _ in range(len(agents))]
-#     planned  = []
-#     for agent_id in order:
-#         agent = agents[agent_id]
-#         path  = space_time_astar(
-#             agent.initial_position, agent.initial_direction,
-#             agent.target, rail, planned, max_timestep,
-#             h_dists[agent_id], start_time=0, time_limit=astar_lim,
-#         )
-#         path_all[agent_id] = path
-#         planned.append(path)
-
-#     # Phase 2: LNS improvement
-#     path_all = run_lns(
-#         agents, rail, path_all, h_dists, max_timestep,
-#         iterations=iters, neighbourhood_size=nbr,
-#         start_time=0,
-#         deadline=time.time() + cfg['lns_budget'],
-#         astar_limit=astar_lim,
-#     )
-#     return path_all, total_delay(agents, path_all, max_timestep)
-
-
-# def get_path(agents, rail, max_timestep):
-#     global _cfg
-
-#     h_dists = precompute_heuristics(agents, rail)
-#     _cfg    = adapt_parameters(agents, h_dists, max_timestep)
-
-#     NUM_WORKERS = min(4, mp.cpu_count())
-
-#     # Each worker gets a different seed → different priority ordering
-#     task_args = [(agents, rail, max_timestep, seed)
-#                  for seed in range(NUM_WORKERS)]
-
-#     try:
-#         with mp.Pool(processes=NUM_WORKERS) as pool:
-#             results = pool.map(_plan_single, task_args)
-#         # Pick whichever worker found the lowest total delay
-#         best_paths, best_delay = min(results, key=lambda r: r[1])
-#         return best_paths
-
-#     except Exception as e:
-#         # Fallback: if multiprocessing fails (e.g. pickling error), run serially
-#         eprint(f"Parallel planning failed ({e}), falling back to serial")
-#         best_paths, _ = _plan_single((agents, rail, max_timestep, 0))
-#         return best_paths
- 
- 
-# # ════════════════════════════════════════════════════════════════════════════
-# #  replan
-# # ════════════════════════════════════════════════════════════════════════════
- 
-# def replan(agents, rail, current_timestep, existing_paths, max_timestep,
-#            new_malfunction_agents, failed_agents):
-#     new_paths = [list(p) for p in existing_paths]
-#     h_dists = precompute_heuristics(agents, rail)
-
-#     cfg           = _cfg if _cfg else {}
-#     astar_lim     = cfg.get('astar_limit', 1.0)
-#     iters_replan  = cfg.get('iters_replan', LNS_ITERATIONS_REPLAN)
-#     replan_budget = cfg.get('replan_budget', LNS_TIME_BUDGET_REPLAN)
-#     nbr           = cfg.get('neighbourhood_size', LNS_NEIGHBOURHOOD_SIZE)
-
-#     # ── Step 1: Fix prefix for ALL active agents ──────────────────────────
-#     for agent in agents:
-#         i = agent.handle
-#         if agent.status in (2, 3) or agent.position is None:
-#             continue
-#         if agent.target:
-#             get_or_compute_heuristic(agent.target, rail)
-#         actual_pos = agent.position
-#         prefix = list(existing_paths[i][:current_timestep])
-#         while len(prefix) < current_timestep:
-#             prefix.append(actual_pos)
-#         if prefix and prefix[-1] != actual_pos:
-#             prefix[-1] = actual_pos
-#         new_paths[i] = prefix  # suffix added below
-
-#     replan_set = set(failed_agents) | set(new_malfunction_agents)
-
-#     # ── Step 2: Fix malfunctioning/failed agents ──────────────────────────
-#     for agent_id in replan_set:
-#         agent = agents[agent_id]
-#         if agent.status in (2, 3) or agent.position is None:
-#             continue
-#         cur_pos, cur_dir = agent.position, agent.direction
-#         mal_dur = (agent.malfunction_data.get("malfunction", 0)
-#                    if agent.malfunction_data else 0)
-#         prefix       = new_paths[agent_id]
-#         wait_segment = [cur_pos] * (mal_dur + 2)
-#         resume_t     = current_timestep + mal_dur + 1
-#         if cur_pos == agent.target:
-#             new_paths[agent_id] = prefix + wait_segment
-#             continue
-#         constraints = [new_paths[i] for i in range(len(agents)) if i != agent_id]
-#         suffix = space_time_astar(
-#             cur_pos, cur_dir, agent.target, rail,
-#             constraints, max_timestep, h_dists[agent_id],
-#             start_time=resume_t, time_limit=astar_lim,
-#         )
-#         #new_paths[agent_id] = prefix + wait_segment + (suffix[1:] if suffix else [])
-#         new_paths[agent_id] = prefix + wait_segment
-    
-#     expanded = set(replan_set)
-#     for aid in list(replan_set):
-#         neighbours = find_blocking_agents(
-#             aid, existing_paths, neighbourhood_size=nbr, start_time=current_timestep
-#         )
-#         expanded.update(neighbours)
-
-#     replan_set = list(expanded)
-#     for i in replan_set:
-#         new_paths[i] = new_paths[i][:current_timestep]
-
-
-#     # Joint LNS planning ───────────────────────────────────────────
-#     frozen_mask = [True] * len(agents)
-    
-#     for i in replan_set:
-#         frozen_mask[i] = False  # only these agents can change
-
-#     new_paths = run_lns(
-#         agents, rail, new_paths, h_dists, max_timestep,
-#         iterations=iters_replan,
-#         neighbourhood_size=len(replan_set),  # stronger coordination
-#         start_time=current_timestep,
-#         frozen_mask=frozen_mask,
-#         deadline=time.time() + replan_budget,
-#         astar_limit=astar_lim,
-#     )
-
-#     return new_paths
-
- 
-######## Cooperative A* ###############
 # ════════════════════════════════════════════════════════════════════════════
 #  get_path — initial planning
 # ════════════════════════════════════════════════════════════════════════════
-
 def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
              max_timestep: int) -> List[List[tuple]]:
     """
-    Runs 4 Cooperative A* planners in parallel, each with a different
-    priority ordering (EDF, slack-based, longest-path-first, random).
-    Returns whichever solution has the fewest failed agents, breaking
-    ties by total path cost.  Falls back to serial seed-0 on any error.
-    After returning, repopulates _heuristic_cache so replan() is fast.
+    Runs up to 5 Cooperative A* planners in parallel:
+      Seeds 0–3: deterministic / random orderings (baseline)
+      Seed 4:    NN-predicted ordering (if model_weights.npz was found)
+ 
+    Returns the solution with fewest failed agents (ties broken by total cost).
+    After returning, repopulates _heuristic_cache for fast replan().
     """
     _heuristic_cache.clear()
  
+    # Build NN features in main process (avoids re-importing in workers)
+    nn_features = None
+    if _NN_AVAILABLE:
+        try:
+            # Compute BFS for each agent's target so extract_features has data
+            h_dists_for_nn = {}
+            for i, ag in enumerate(agents):
+                if ag.target is not None and ag.initial_position is not None:
+                    h_dists_for_nn[i] = bfs_heuristic(ag.target, rail)
+                else:
+                    h_dists_for_nn[i] = {}
+            grid_rows = getattr(rail, 'height', 50) or 50
+            grid_cols = getattr(rail, 'width',  50) or 50
+            nn_features = _extract_nn_features(
+                agents, h_dists_for_nn, max_timestep, grid_rows, grid_cols
+            )
+        except Exception as e:
+            eprint(f"[solution] NN feature extraction failed ({e})")
+ 
     NUM_WORKERS = min(4, mp.cpu_count())
-    task_args = [(agents, rail, max_timestep, seed)
+    base_args = [(agents, rail, max_timestep, seed)
                  for seed in range(NUM_WORKERS)]
  
-    try:
-        # 'fork' inherits parent memory — avoids reimporting flatland in workers
-        ctx = mp.get_context('fork')
-        with ctx.Pool(processes=NUM_WORKERS) as pool:
-            results = pool.map(_plan_worker, task_args)
-        best_paths, _ = min(results, key=lambda r: r[1])
-    except Exception as e:
-        eprint(f"Parallel planning failed ({e}), falling back to serial")
-        best_paths, _ = _plan_worker((agents, rail, max_timestep, 0))
+    # Add NN worker if features are ready
+    if nn_features is not None:
+        all_args = base_args + [(agents, rail, max_timestep, 4, nn_features)]
+    else:
+        all_args = base_args
  
-    # Repopulate module-level cache so replan() doesn't redo BFS from scratch
-    for agent in agents:
-        if agent.target:
-            get_or_compute_heuristic(agent.target, rail)
+    try:
+        ctx = mp.get_context('fork')
+        with ctx.Pool(processes=min(len(all_args), mp.cpu_count())) as pool:
+            results = pool.map(_plan_worker, all_args)
+        best_paths, best_score = min(results, key=lambda r: r[1])
+    except Exception as e:
+        eprint(f"Parallel planning failed ({e}), falling back to serial seed-0")
+        best_paths, best_score = _plan_worker((agents, rail, max_timestep, 0))
+ 
+    eprint(f"[get_path] best=(failed={best_score[0]}, cost={best_score[1]})")
+ 
+    # Populate module-level BFS cache for replan()
+    for ag in agents:
+        if ag.target:
+            get_or_compute_heuristic(ag.target, rail)
  
     return best_paths
-
-# def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
-#              max_timestep: int) -> List[List[tuple]]:
-#     """
-#     Cooperative A* — earliest deadline first.
-#     Agents with tighter deadlines get priority access to shortest paths.
-#     BFS heuristics are cached so repeated goals cost nothing.
-#     """
-#     # Clear cache at the start of each new problem
-#     _heuristic_cache.clear()
-
-#     n = len(agents)
-#     path_all = [[] for _ in range(n)]
-
-#     order = sorted(
-#         range(n),
-#         key=lambda i: (
-#             agents[i].deadline if agents[i].deadline is not None else max_timestep,
-#             # Break ties by raw distance so closer-to-goal agents go first
-#             get_or_compute_heuristic(
-#                 agents[i].target, rail
-#             ).get(agents[i].initial_position, max_timestep)
-#         )
-#     )
-
-#     planned: List[list] = []
-
-#     for agent_id in order:
-#         agent = agents[agent_id]
-#         h_dist = get_or_compute_heuristic(agent.target, rail)
-
-#         path = space_time_astar(
-#             agent.initial_position,
-#             agent.initial_direction,
-#             agent.target,
-#             rail,
-#             planned,
-#             max_timestep,
-#             h_dist,
-#             start_time=0,
-#             deadline=agent.deadline,
-#         )
-
-#         path_all[agent_id] = path
-#         planned.append(path)
-
-#     return path_all
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+ 
+ 
+# ════════════════════════════════════════════════════════════════════════════
 #  replan — malfunction / collision recovery
-# ─────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
 def replan(
     agents: List[EnvAgent],
     rail: GridTransitionMap,
@@ -790,120 +372,98 @@ def replan(
 ) -> List[List[tuple]]:
     """
     Repair paths after a malfunction or collision.
-
+ 
     Pass 1 — replan directly affected agents (malfunctioned / failed),
-              earliest deadline first.
+              sorted by earliest deadline first.
     Pass 2 — detect cascade conflicts introduced by Pass 1 and replan those
-              agents too.  Repeated for up to 2 rounds to catch chains.
-
-    BFS heuristics are served from the module-level cache (free after
-    get_path already populated them).
+              agents too. Repeated for up to 2 rounds.
+ 
+    BFS heuristics are served from the module-level cache populated by
+    get_path(), so replanning is cheap.
+ 
+    The search horizon is capped based on instance size to keep latency low:
+      • n ≥ 150 agents → horizon = 100
+      • n in [75, 150) → horizon = 100
+      • n in [25, 75)  → horizon = 500
+      • otherwise      → max_timestep
     """
     new_paths = [list(p) for p in existing_paths]
     replan_set = set(failed_agents) | set(new_malfunction_agents)
-
+    n = len(agents)
+ 
+    # Cap search horizon based on instance size to control runtime
+    if n >= 75:
+        search_horizon = 100
+    elif n >= 25:
+        search_horizon = 500
+    else:
+        search_horizon = max_timestep
+ 
     def deadline_key(i):
         return (agents[i].deadline if agents[i].deadline is not None
                 else max_timestep)
-
+ 
     def _replan_one(agent_id: int):
-        """Replan a single agent in-place inside new_paths."""
         agent = agents[agent_id]
-        # Skip finished or unspawned agents
         if agent.status in (2, 3) or agent.position is None:
             return
-
+ 
         cur_pos = agent.position
         cur_dir = agent.direction
         mal_dur = (agent.malfunction_data.get("malfunction", 0)
                    if agent.malfunction_data else 0)
-
-        # Already at goal — extend with waits so path doesn't expire
+ 
         if cur_pos == agent.target:
             prefix = list(existing_paths[agent_id][:current_timestep])
             new_paths[agent_id] = prefix + [cur_pos] * max(mal_dur, 1)
             return
-
-        # Immutable history prefix aligned to current_timestep
+ 
         raw_prefix = list(existing_paths[agent_id][:current_timestep])
         if len(raw_prefix) < current_timestep:
             raw_prefix += [cur_pos] * (current_timestep - len(raw_prefix))
         prefix = raw_prefix
-
-        # Forced wait during malfunction (empty if mal_dur == 0)
+ 
         wait_segment = [cur_pos] * mal_dur
         resume_t = current_timestep + mal_dur
-
-        constraints = [new_paths[i] for i in range(len(agents))
-                       if i != agent_id]
+ 
+        constraints = [new_paths[i] for i in range(n) if i != agent_id]
         h_dist = get_or_compute_heuristic(agent.target, rail)
-
-        if len(agents) >=75 and len(agents)<150:
-            suffix = space_time_astar(
+ 
+        suffix = space_time_astar(
             cur_pos, cur_dir, agent.target,
-            rail, constraints, 100, h_dist,
+            rail, constraints, search_horizon, h_dist,
             start_time=resume_t,
             deadline=agent.deadline,
-            )
-        
-        elif len(agents) >= 25 and len(agents) <= 37:
-            suffix = space_time_astar(
-            cur_pos, cur_dir, agent.target,
-            rail, constraints, 500, h_dist,
-            start_time=resume_t,
-            deadline=agent.deadline,
-            )
-
-        elif len(agents) >=150:
-            suffix = space_time_astar(
-            cur_pos, cur_dir, agent.target,
-            rail, constraints, 100, h_dist,
-            start_time=resume_t,
-            deadline=agent.deadline,
-            )
-
-        else:
-            suffix = space_time_astar(
-            cur_pos, cur_dir, agent.target,
-            rail, constraints, max_timestep, h_dist,
-            start_time=resume_t,
-            deadline=agent.deadline,
-            )
-
+        )
+ 
         if suffix:
-            # suffix[0] == cur_pos == wait_segment[-1] when mal_dur > 0,
-            # so drop the duplicate head only in that case.
             tail = suffix[1:] if mal_dur > 0 else suffix
             new_paths[agent_id] = prefix + wait_segment + tail
         else:
             new_paths[agent_id] = prefix + wait_segment
-
+ 
     def _find_cascade_conflicts(already_replanned: set) -> set:
-        """
-        Return the set of agent ids (not in already_replanned) whose
-        current new_path conflicts with any other agent's new_path.
-        """
         affected = set()
-        for agent_id in range(len(agents)):
+        for agent_id in range(n):
             if agent_id in already_replanned:
                 continue
             agent = agents[agent_id]
             if agent.status in (2, 3) or agent.position is None:
                 continue
             path = new_paths[agent_id]
-            other_paths = [new_paths[i] for i in range(len(agents))
-                           if i != agent_id]
-            for t in range(current_timestep, min(len(path) - 1, max_timestep)):
+            other_paths = [new_paths[i] for i in range(n) if i != agent_id]
+            for t in range(current_timestep,
+                           min(len(path) - 1, max_timestep)):
                 if has_conflict(path[t + 1], path[t], t, other_paths):
                     affected.add(agent_id)
                     break
         return affected
-
-    # ── Pass 1: directly affected agents ────────────────────────────────────
+ 
+    # ── Pass 1: directly affected agents ─────────────────────────────────
     for agent_id in sorted(replan_set, key=deadline_key):
         _replan_one(agent_id)
-
-    # ── Pass 2: cascade rounds (2 rounds catches most chain conflicts) ───────
+ 
+    # ── Pass 2: cascade rounds ────────────────────────────────────────────
     for _ in range(2):
         affected = _find_cascade_conflicts(replan_set)
         if not affected:
@@ -911,7 +471,7 @@ def replan(
         for agent_id in sorted(affected, key=deadline_key):
             _replan_one(agent_id)
         replan_set |= affected
-
+ 
     return new_paths
     
 
