@@ -253,8 +253,9 @@ def _plan_worker(args):
     else:
         order = sorted(range(n), key=lambda i: (ddl(i), h(i)))
  
-    # Per-agent time budget: scale so total worker stays under ~30s.
-    per_agent_limit = max(1.0, min(10.0, 30.0 / max(1, n)))
+    # Per-agent time budget: scale so total worker stays under ~60s.
+    # Workers run in parallel so we can afford more per worker.
+    per_agent_limit = max(2.0, min(15.0, 60.0 / max(1, n)))
     worker_start = time.time()
  
     planned: List[list] = []
@@ -391,13 +392,18 @@ def replan(
     replan_set = set(failed_agents) | set(new_malfunction_agents)
     n = len(agents)
  
-    # Cap search horizon based on instance size to control runtime
+    # Tight search horizon — replan only needs to reach goal from current pos,
+    # not from t=0, so remaining steps = max_timestep - current_timestep.
+    remaining_steps = max(10, max_timestep - current_timestep)
     if n >= 75:
-        search_horizon = 100
+        search_horizon = min(remaining_steps, 80)
+        replan_time_limit = 0.5
     elif n >= 25:
-        search_horizon = 500
+        search_horizon = min(remaining_steps, 150)
+        replan_time_limit = 1.0
     else:
-        search_horizon = max_timestep
+        search_horizon = min(remaining_steps, max_timestep)
+        replan_time_limit = 2.0
  
     def deadline_key(i):
         return (agents[i].deadline if agents[i].deadline is not None
@@ -434,7 +440,19 @@ def replan(
             rail, constraints, search_horizon, h_dist,
             start_time=resume_t,
             deadline=agent.deadline,
+            time_limit=replan_time_limit,
         )
+        # If search timed out or failed, try constraint-free as fallback
+        if not suffix or len(set(suffix)) == 1:
+            suffix_free = space_time_astar(
+                cur_pos, cur_dir, agent.target,
+                rail, [], search_horizon, h_dist,
+                start_time=resume_t,
+                deadline=agent.deadline,
+                time_limit=1.0,
+            )
+            if suffix_free and len(set(suffix_free)) > 1:
+                suffix = suffix_free
  
         if suffix:
             tail = suffix[1:] if mal_dur > 0 else suffix
@@ -444,6 +462,9 @@ def replan(
  
     def _find_cascade_conflicts(already_replanned: set) -> set:
         affected = set()
+        # Only check a short window ahead — conflicts far in future
+        # will be handled by future replan() calls
+        check_end = min(current_timestep + 30, max_timestep)
         for agent_id in range(n):
             if agent_id in already_replanned:
                 continue
@@ -452,8 +473,7 @@ def replan(
                 continue
             path = new_paths[agent_id]
             other_paths = [new_paths[i] for i in range(n) if i != agent_id]
-            for t in range(current_timestep,
-                           min(len(path) - 1, max_timestep)):
+            for t in range(current_timestep, min(len(path) - 1, check_end)):
                 if has_conflict(path[t + 1], path[t], t, other_paths):
                     affected.add(agent_id)
                     break
