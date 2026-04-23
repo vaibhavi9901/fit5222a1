@@ -28,7 +28,6 @@ test = 1
 debug = False
 visualizer = False
 
-np.errstate(all='ignore')
 
 # ── Neural-network priority module ──────────────────────────────────────────
 _NN_AVAILABLE = False
@@ -50,7 +49,7 @@ except Exception as e:
 #  BFS heuristic cache
 # ─────────────────────────────────────────────────────────────────────────────
 _heuristic_cache: Dict[tuple, dict] = {}
-_rail_ref = None   # remember the rail so we can reuse cache across replans
+_rail_ref = None
  
  
 def get_or_compute_heuristic(goal: tuple, rail: GridTransitionMap) -> dict:
@@ -128,7 +127,7 @@ def space_time_astar(
         expansion_count += 1
         if time_limit is not None and expansion_count % 500 == 0:
             if time.time() - search_start_wall > time_limit:
-                return []   # Return empty on timeout — caller decides fallback
+                return []
  
         f, g, x, y, direction, t = heapq.heappop(open_heap)
         state = (x, y, direction, t)
@@ -188,16 +187,11 @@ def space_time_astar(
  
 def _astar_with_fallback(start, start_dir, goal, rail, constraints,
                          horizon, h_dist, start_time, deadline, time_limit):
-    """
-    Try A* with constraints. If it fails/times out, retry without constraints.
-    Always returns a non-empty path if the goal is reachable at all.
-    """
     path = space_time_astar(start, start_dir, goal, rail, constraints,
                             horizon, h_dist, start_time=start_time,
                             deadline=deadline, time_limit=time_limit)
     if path:
         return path
-    # Fallback: ignore constraints — agent gets a path but may collide
     path = space_time_astar(start, start_dir, goal, rail, [],
                             horizon, h_dist, start_time=start_time,
                             deadline=deadline, time_limit=time_limit)
@@ -206,15 +200,16 @@ def _astar_with_fallback(start, start_dir, goal, rail, constraints,
  
 # ─────────────────────────────────────────────────────────────────────────────
 #  Parallel worker
+#  Args tuple is always 6 elements:
+#    (agents, rail, max_timestep, seed, nn_features, precomputed_h)
+#  nn_features and precomputed_h may be None.
 # ─────────────────────────────────────────────────────────────────────────────
 def _plan_worker(args):
-    if len(args) == 5:
-        agents, rail, max_timestep, seed, nn_features = args
-    else:
-        agents, rail, max_timestep, seed = args
-        nn_features = None
+    agents, rail, max_timestep, seed, nn_features, precomputed_h = args
  
-    local_cache: Dict[tuple, dict] = {}
+    # Seed local BFS cache from precomputed maps (avoids redundant BFS calls).
+    # precomputed_h maps goal_tuple → dist_dict.
+    local_cache: Dict[tuple, dict] = dict(precomputed_h) if precomputed_h else {}
  
     def local_h(goal):
         if goal not in local_cache:
@@ -242,23 +237,17 @@ def _plan_worker(args):
         order = list(range(n))
         random.seed(42)
         random.shuffle(order)
-    elif seed == 4 and nn_features is not None:
+    elif seed == 4 and nn_features is not None and _priority_net is not None:
         try:
-            from nn_priority import AgentPriorityNet
-            local_net = AgentPriorityNet()
-            model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      "model_weights.npz")
-            local_net.load(model_path)
-            scores = local_net.forward(nn_features)
-            order = np.argsort(scores).tolist()
+            scores = _priority_net.forward(nn_features)
+            order  = np.argsort(scores).tolist()
         except Exception:
             order = sorted(range(n), key=lambda i: (ddl(i), h(i)))
     else:
         order = sorted(range(n), key=lambda i: (ddl(i), h(i)))
  
-    # Per-agent wall-clock budget
     per_agent_limit = max(2.0, min(15.0, 60.0 / max(1, n)))
-    worker_start = time.time()
+    worker_start    = time.time()
  
     planned: List[list] = []
     for agent_id in order:
@@ -267,7 +256,7 @@ def _plan_worker(args):
             planned.append([])
             continue
  
-        elapsed = time.time() - worker_start
+        elapsed   = time.time() - worker_start
         remaining = len(order) - len(planned)
         time_left = max(1.0, per_agent_limit * remaining - elapsed)
  
@@ -289,44 +278,67 @@ def _plan_worker(args):
 # ════════════════════════════════════════════════════════════════════════════
 #  get_path — initial planning
 # ════════════════════════════════════════════════════════════════════════════
+_MP_CTX = 'fork' if sys.platform.startswith('linux') else 'spawn'
+ 
 def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
              max_timestep: int) -> List[List[tuple]]:
     global _rail_ref
     _heuristic_cache.clear()
     _rail_ref = rail
  
-    # Build NN features — reuse BFS maps that workers will also need,
-    # so we compute them once here and share via fork.
-    nn_features = None
+    # Pre-compute BFS maps once — shared with all workers via fork / passed explicitly.
+    nn_features  = None
     h_dists_main: Dict[int, dict] = {}
+    # precomputed_h maps goal_tuple → dist_dict (what workers need for local_cache)
+    precomputed_h: Dict[tuple, dict] = {}
+ 
     for i, ag in enumerate(agents):
         if ag.target is not None and ag.initial_position is not None:
-            h_dists_main[i] = bfs_heuristic(ag.target, rail)
-            _heuristic_cache[ag.target] = h_dists_main[i]
+            if ag.target not in precomputed_h:
+                precomputed_h[ag.target] = bfs_heuristic(ag.target, rail)
+                _heuristic_cache[ag.target] = precomputed_h[ag.target]
+            h_dists_main[i] = precomputed_h[ag.target]
  
-    if _NN_AVAILABLE:
+    if _NN_AVAILABLE and _priority_net is not None:
         try:
             grid_rows = getattr(rail, 'height', 50) or 50
             grid_cols = getattr(rail, 'width',  50) or 50
+            _agent_deadlines = [
+                ag.deadline if ag.deadline is not None else max_timestep
+                for ag in agents
+            ]
             nn_features = _extract_nn_features(
-                agents, h_dists_main, max_timestep, grid_rows, grid_cols
+                agents, h_dists_main, max_timestep, grid_rows, grid_cols,
+                deadlines=_agent_deadlines,
             )
         except Exception as e:
             eprint(f"[solution] NN feature extraction failed ({e})")
  
     NUM_WORKERS = min(4, mp.cpu_count())
-    base_args = [(agents, rail, max_timestep, seed) for seed in range(NUM_WORKERS)]
-    all_args = base_args + ([(agents, rail, max_timestep, 4, nn_features)]
-                             if nn_features is not None else [])
+ 
+    # All args tuples are always 6 elements — no more unpacking mismatches.
+    base_args = [
+        (agents, rail, max_timestep, seed, None, precomputed_h)
+        for seed in range(NUM_WORKERS)
+    ]
+    nn_args = (
+        [(agents, rail, max_timestep, 4, nn_features, precomputed_h)]
+        if nn_features is not None and _NN_AVAILABLE and _priority_net is not None
+        else []
+    )
+    all_args = base_args + nn_args
  
     try:
-        ctx = mp.get_context('fork')
+        ctx = mp.get_context(_MP_CTX)
         with ctx.Pool(processes=min(len(all_args), mp.cpu_count())) as pool:
             results = pool.map(_plan_worker, all_args)
         best_paths, best_score = min(results, key=lambda r: r[1])
     except Exception as e:
         eprint(f"Parallel planning failed ({e}), falling back to serial")
-        best_paths, best_score = _plan_worker((agents, rail, max_timestep, 0))
+        # Serial fallback also uses 6-element tuple
+        best_paths, best_score = _plan_worker(
+            (agents, rail, max_timestep, 0, None, precomputed_h)
+        )
  
     eprint(f"[get_path] best=(failed={best_score[0]}, cost={best_score[1]})")
     return best_paths
@@ -344,26 +356,24 @@ def replan(
     new_malfunction_agents: List[int],
     failed_agents: List[int],
 ) -> List[List[tuple]]:
-    new_paths = [list(p) for p in existing_paths]
+    new_paths  = [list(p) for p in existing_paths]
     replan_set = set(failed_agents) | set(new_malfunction_agents)
-    n = len(agents)
+    n          = len(agents)
  
-    # How many steps remain — the search only needs to cover this window
     remaining_steps = max(20, max_timestep - current_timestep)
  
     if n >= 75:
-        search_horizon = current_timestep + min(remaining_steps, 80)
+        search_horizon    = current_timestep + min(remaining_steps, 80)
         replan_time_limit = 0.5
     elif n >= 25:
-        search_horizon = current_timestep + min(remaining_steps, 200)
-        replan_time_limit = 0.1
+        search_horizon    = current_timestep + min(remaining_steps, 150)
+        replan_time_limit = max(0.3, 10.0 / n)
     else:
-        search_horizon = current_timestep + remaining_steps
+        search_horizon    = current_timestep + remaining_steps
         replan_time_limit = 0.25
  
     def deadline_key(i):
-        return (agents[i].deadline if agents[i].deadline is not None
-                else max_timestep)
+        return agents[i].deadline if agents[i].deadline is not None else max_timestep
  
     def _replan_one(agent_id: int):
         agent = agents[agent_id]
@@ -375,7 +385,6 @@ def replan(
         mal_dur = (agent.malfunction_data.get("malfunction", 0)
                    if agent.malfunction_data else 0)
  
-        # Already at goal — just extend with waits
         if cur_pos == agent.target:
             prefix = list(existing_paths[agent_id][:current_timestep])
             new_paths[agent_id] = prefix + [cur_pos] * max(mal_dur, 1)
@@ -386,14 +395,12 @@ def replan(
             raw_prefix += [cur_pos] * (current_timestep - len(raw_prefix))
  
         wait_segment = [cur_pos] * mal_dur
-        resume_t = current_timestep + mal_dur
+        resume_t     = current_timestep + mal_dur
  
         constraints = [new_paths[i] for i in range(n) if i != agent_id]
-        h_dist = get_or_compute_heuristic(agent.target, rail)
+        h_dist      = get_or_compute_heuristic(agent.target, rail)
  
-        # Check goal is reachable from current position
         if cur_pos not in h_dist:
-            # Agent is on a cell with no route to goal — just wait
             new_paths[agent_id] = raw_prefix + wait_segment
             return
  
@@ -409,11 +416,10 @@ def replan(
             tail = suffix[1:] if mal_dur > 0 else suffix
             new_paths[agent_id] = raw_prefix + wait_segment + tail
         else:
-            # Cannot reach goal at all — extend with waits to avoid blocking
             new_paths[agent_id] = raw_prefix + wait_segment
  
     def _find_cascade_conflicts(already_replanned: set) -> set:
-        affected = set()
+        affected  = set()
         check_end = min(current_timestep + 40, max_timestep)
         for agent_id in range(n):
             if agent_id in already_replanned:
@@ -421,7 +427,7 @@ def replan(
             agent = agents[agent_id]
             if agent.status in (2, 3) or agent.position is None:
                 continue
-            path = new_paths[agent_id]
+            path        = new_paths[agent_id]
             other_paths = [new_paths[i] for i in range(n) if i != agent_id]
             for t in range(current_timestep, min(len(path) - 1, check_end)):
                 if has_conflict(path[t + 1], path[t], t, other_paths):
@@ -429,11 +435,9 @@ def replan(
                     break
         return affected
  
-    # Pass 1: directly affected agents, EDF order
     for agent_id in sorted(replan_set, key=deadline_key):
         _replan_one(agent_id)
  
-    # Pass 2: cascade conflict resolution (up to 3 rounds)
     for _ in range(3):
         affected = _find_cascade_conflicts(replan_set)
         if not affected:

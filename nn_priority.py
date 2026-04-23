@@ -61,6 +61,19 @@ class AgentPriorityNet:
         # Adam moment buffers — initialised lazily on first train_step call
         self._adam: dict = {}
         self._t: int = 0          # global step counter
+    
+    def _print_weight_stats(self, tag: str, show_full: bool = False):
+        """Print min, max, mean, std, and fraction of non‑finite values for all weights."""
+        for name in ['W1', 'b1', 'W2', 'b2', 'W3', 'b3']:
+            w = getattr(self, name)
+            fin_frac = np.mean(np.isfinite(w))
+            if fin_frac < 1.0:
+                print(f"[{tag}] {name}: non-finite fraction = {1-fin_frac:.2%}")
+            else:
+                print(f"[{tag}] {name}: min={w.min():8.4f}  max={w.max():8.4f}  "
+                    f"mean={w.mean():8.4f}  std={w.std():8.4f}")
+            if show_full:
+                print(f"     {name} = {w}")
 
     # ── Activations ──────────────────────────────────────────────────────
     @staticmethod
@@ -70,9 +83,17 @@ class AgentPriorityNet:
     # ── Forward pass ─────────────────────────────────────────────────────
     def forward(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=np.float64)
+        X = np.nan_to_num(X, nan=0.0, posinf=2.0, neginf=-2.0)
         X = np.clip(X, -2.0, 2.0)
-        # No weight clipping here — forward must match the training computation
-        # exactly (train_step clips pre-activations to ±10, not weights).
+
+        self._print_weight_stats("forward (pre)")
+
+        # Guard against exploded or non-finite weights before the matmul.
+        # Magnitude cap (<=100) matches the threshold used in the train functions.
+        def _weights_ok(w):
+            return np.all(np.isfinite(w)) and np.abs(w).max() <= 100.0
+        if not (_weights_ok(self.W1) and _weights_ok(self.W2) and _weights_ok(self.W3)):
+            return X[:, 2]   # fallback to analytic slack
         z1 = X @ self.W1 + self.b1
         a1 = self._relu(np.clip(z1, -10.0, 10.0))
         z2 = a1 @ self.W2 + self.b2
@@ -117,18 +138,30 @@ class AgentPriorityNet:
     # ── MSE train step ───────────────────────────────────────────────────
     def train_step(self, X: np.ndarray, y_rank: np.ndarray, lr: float = 1e-3) -> float:
         X = np.asarray(X, dtype=np.float64)
+        X = np.nan_to_num(X, nan=0.0, posinf=2.0, neginf=-2.0)   # same guard as forward()
+        X = np.clip(X, -2.0, 2.0)
         n = X.shape[0]
         self._t += 1
+        for name, w in [('W1', self.W1), ('W2', self.W2), ('W3', self.W3)]:
+            if not np.all(np.isfinite(w)) or np.abs(w).max() > 100.0:
+                print(f"[nn_priority] WARNING: {name} exploded — reinitialising")
+                self.__init__()
+                return 0.0
+            
+        self._print_weight_stats("train_step (pre forward)")
 
         # Forward — matches forward() exactly: clip pre-activations, ReLU, no weight clip
         z1 = X @ self.W1 + self.b1
         z1 = np.clip(z1, -10.0, 10.0)
-        a1 = self._relu(z1)          # a1 in [0, 10] — no redundant clip needed
+        z1 = np.nan_to_num(z1, nan=0.0, posinf=10.0, neginf=0.0)  # NaN survives clip
+        a1 = self._relu(z1)          # a1 in [0, 10]
         z2 = a1 @ self.W2 + self.b2
         z2 = np.clip(z2, -10.0, 10.0)
+        z2 = np.nan_to_num(z2, nan=0.0, posinf=10.0, neginf=0.0)  # NaN survives clip
         a2 = self._relu(z2)          # a2 in [0, 10]
         z3 = a2 @ self.W3 + self.b3
         z3 = np.clip(z3, -10.0, 10.0)
+        z3 = np.nan_to_num(z3, nan=0.0, posinf=10.0, neginf=0.0)  # NaN survives clip
         pred = z3.squeeze(-1)
 
         diff = pred - y_rank
@@ -140,6 +173,7 @@ class AgentPriorityNet:
         # so gradient is zero wherever the clip was saturating at +10.
         dout = (2.0 / n) * diff
         dout3 = dout[:, None]
+        dout3 = np.nan_to_num(dout3, nan=0.0, posinf=0.0, neginf=0.0)  # belt-and-braces
 
         dW3 = a2.T @ dout3
         db3 = dout3.sum(axis=0)
@@ -164,24 +198,37 @@ class AgentPriorityNet:
         self.W3 = self._adam_update('W3', self.W3, dW3, lr)
         self.b3 = self._adam_update('b3', self.b3, db3, lr)
 
+        self._print_weight_stats("train_step (post update)")
+
         return loss
 
     # ── Pairwise ranking loss ────────────────────────────────────────────
     def pairwise_train_step(self, X: np.ndarray, ranks: np.ndarray,
                             lr: float = 1e-3, margin: float = 0.1) -> float:
         X = np.asarray(X, dtype=np.float64)
+        X = np.nan_to_num(X, nan=0.0, posinf=2.0, neginf=-2.0)   # same guard as forward()
+        X = np.clip(X, -2.0, 2.0)
         n = X.shape[0]
         self._t += 1
+
+        for name, w in [('W1', self.W1), ('W2', self.W2), ('W3', self.W3)]:
+            if not np.all(np.isfinite(w)) or np.abs(w).max() > 100.0:
+                print(f"[nn_priority] WARNING: {name} exploded — reinitialising")
+                self.__init__()
+                return 0.0
 
         # Forward — matches forward() exactly
         z1 = X @ self.W1 + self.b1
         z1 = np.clip(z1, -10.0, 10.0)
+        z1 = np.nan_to_num(z1, nan=0.0, posinf=10.0, neginf=0.0)  # NaN survives clip
         a1 = self._relu(z1)          # a1 in [0, 10]
         z2 = a1 @ self.W2 + self.b2
         z2 = np.clip(z2, -10.0, 10.0)
+        z2 = np.nan_to_num(z2, nan=0.0, posinf=10.0, neginf=0.0)  # NaN survives clip
         a2 = self._relu(z2)          # a2 in [0, 10]
         z3 = a2 @ self.W3 + self.b3
         z3 = np.clip(z3, -10.0, 10.0)
+        z3 = np.nan_to_num(z3, nan=0.0, posinf=10.0, neginf=0.0)  # NaN survives clip
         z3 = z3.squeeze(-1)
 
         # Vectorised pairwise hinge loss
@@ -204,6 +251,8 @@ class AgentPriorityNet:
             return 0.0
 
         dout3 = dz3[:, None]
+        dout3 = np.nan_to_num(dout3, nan=0.0, posinf=0.0, neginf=0.0)  # belt-and-braces
+
         dW3 = a2.T @ dout3
         db3 = dout3.sum(axis=0)
         da2 = dout3 @ self.W3.T
@@ -226,6 +275,8 @@ class AgentPriorityNet:
         self.b2 = self._adam_update('b2', self.b2, db2, lr)
         self.W3 = self._adam_update('W3', self.W3, dW3, lr)
         self.b3 = self._adam_update('b3', self.b3, db3, lr)
+
+        self._print_weight_stats("train_step (post update)")
 
         return loss
 
@@ -309,4 +360,7 @@ def extract_features(agents, h_dists: dict, max_timestep: int,
             min(min_dist, 50) / 50.0,
         ]
 
+    # Clamp any inf/nan that BFS or division may have introduced
+    X = np.nan_to_num(X, nan=0.0, posinf=1.0, neginf=0.0)
+    X = np.clip(X, 0.0, 1.0)   # all features are normalised to [0,1]
     return X
