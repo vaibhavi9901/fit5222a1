@@ -497,13 +497,21 @@ def ecbs_plan(agents: List[EnvAgent], rail: GridTransitionMap,
  
             # Add conflict constraint
             if ctype == 'vertex':
-                loc = path_i[t + 1] if constrained_agent == ai else path_j[t + 1]
-                new_vc[constrained_agent].add((t + 1, loc[0], loc[1]))
-            else:  # edge
+                # Conflict at time t on same cell
+                loc = path_i[t]   # same as path_j[t]
+                new_vc[constrained_agent].add((t, loc[0], loc[1]))
+            else:  # edge conflict (swap)
+                # Add edge constraint: agent cannot take the conflicting edge at time t
                 if constrained_agent == ai:
-                    new_vc[constrained_agent].add((t + 1, path_i[t + 1][0], path_i[t + 1][1]))
+                    if t + 1 < len(path_i):
+                        new_ec[constrained_agent].add((t,
+                                                    path_i[t][0], path_i[t][1],
+                                                    path_i[t+1][0], path_i[t+1][1]))
                 else:
-                    new_vc[constrained_agent].add((t + 1, path_j[t + 1][0], path_j[t + 1][1]))
+                    if t + 1 < len(path_j):
+                        new_ec[constrained_agent].add((t,
+                                                    path_j[t][0], path_j[t][1],
+                                                    path_j[t+1][0], path_j[t+1][1]))
  
             # Add symmetry constraints
             new_vc[constrained_agent] |= sym_vc
