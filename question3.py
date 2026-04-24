@@ -753,13 +753,11 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
  
     # ── Very large instances: PIBT ────────────────────────────────────────────
     if n > PIBT_THRESHOLD:
-        eprint(f"[get_path] n={n} → PIBT")
         paths = pibt_plan(agents, rail, max_timestep, h_dists)
         return paths
  
     # ── Medium instances: parallel Coop-A* + LNS2 ────────────────────────────
     if n > ECBS_THRESHOLD:
-        eprint(f"[get_path] n={n} → Coop-A* + LNS2")
         NUM_WORKERS = min(4, mp.cpu_count())
         task_args = [(agents, rail, max_timestep, seed)
                      for seed in range(NUM_WORKERS)]
@@ -781,7 +779,6 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
         return best_paths
  
     # ── Small instances: ECBS + LNS2 polishing ───────────────────────────────
-    eprint(f"[get_path] n={n} → ECBS + LNS2")
     ecbs_limit = min(ECBS_WALL, 30.0 - (time.time() - wall0))
     paths = ecbs_plan(agents, rail, max_timestep, h_dists,
                       w=1.3, wall_limit=ecbs_limit)
