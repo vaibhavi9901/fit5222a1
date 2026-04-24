@@ -22,10 +22,10 @@ except Exception as e:
 #########################
 
 # Set these debug option to True if you want more information printed
-test_single_instance = False
-level = 1
-test = 1
-debug = False
+test_single_instance = True
+level = 4
+test = 0
+debug = True
 visualizer = False
 
     # ═════════════════════════════════════════════════════════════════════════════
@@ -893,7 +893,7 @@ def replan(
         elif len(agents) >= 25 and len(agents) <= 37:
             suffix = space_time_astar(
             cur_pos, cur_dir, agent.target,
-            rail, constraints, 400, h_dist,
+            rail, constraints, 100, h_dist,
             start_time=resume_t,
             deadline=agent.deadline,
             )
