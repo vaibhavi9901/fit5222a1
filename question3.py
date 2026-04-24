@@ -23,8 +23,8 @@ except Exception as e:
 
 # Set these debug option to True if you want more information printed
 test_single_instance = True
-level = 4
-test = 0
+level = 2
+test = 4
 debug = True
 visualizer = False
 
@@ -834,11 +834,11 @@ def replan(
     def _effective_max_t(agent_count):
         """Scale search horizon with instance size to stay within budget."""
         if agent_count >= 150:
-            return min(max_timestep, current_timestep + 80)
+            return min(max_timestep, current_timestep)
         if agent_count >= 75:
-            return min(max_timestep, current_timestep + 120)
+            return min(max_timestep, current_timestep)
         if agent_count >= 25:
-            return min(max_timestep, current_timestep + 300)
+            return min(max_timestep, current_timestep)
         return max_timestep
  
     eff_max_t = _effective_max_t(n)
