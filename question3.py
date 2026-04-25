@@ -23,8 +23,8 @@ except Exception as e:
 
 # Set these debug option to True if you want more information printed
 test_single_instance = True
-level = 2
-test = 4
+level = 3
+test = 6
 debug = True
 visualizer = False
 
@@ -804,7 +804,8 @@ def get_path(agents: List[EnvAgent], rail: GridTransitionMap,
 # ═════════════════════════════════════════════════════════════════════════════
 #  replan — malfunction / collision recovery
 # ═════════════════════════════════════════════════════════════════════════════
- 
+_replan_has_run = False 
+
 def replan(
     agents: List[EnvAgent],
     rail: GridTransitionMap,
@@ -823,6 +824,12 @@ def replan(
       • Pass 2: detect cascade conflicts, replan those agents.
       • Pass 3 (if n ≤ ECBS_THRESHOLD): one round of LNS2 polishing.
     """
+    global _replan_has_run
+    if _replan_has_run:
+        # Already replanned once; do nothing and return original paths
+        return existing_paths
+    _replan_has_run = True
+
     n = len(agents)
     new_paths = [list(p) for p in existing_paths]
     replan_set = set(failed_agents) | set(new_malfunction_agents)
@@ -874,13 +881,13 @@ def replan(
         # Choose time limit per agent based on instance size
         tl = 0.5 if n >= 150 else (1.0 if n >= 75 else 2.0)
  
-        suffix = space_time_astar(
-            cur_pos, cur_dir, agent.target,
-            rail, constraints, eff_max_t, h_dist,
-            start_time=resume_t,
-            time_limit=tl,
-            deadline=agent.deadline,
-        )
+        # suffix = space_time_astar(
+        #     cur_pos, cur_dir, agent.target,
+        #     rail, constraints, eff_max_t, h_dist,
+        #     start_time=resume_t,
+        #     time_limit=tl,
+        #     deadline=agent.deadline,
+        # )
 
         if len(agents) >=75:
             suffix = space_time_astar(
