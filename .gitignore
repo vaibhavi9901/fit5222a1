@@ -144,6 +144,4 @@ cython_debug/
 .vscode
 
 #question
-question1.py
-question2.py
-question3.py
+dont/
